@@ -92,6 +92,49 @@ async def test_non_git_install_reports_reason(tmp_path):
     assert st["available"] is False and st["reason"]
 
 
+async def test_apply_over_wire_replies_then_restarts(repos, tmp_path):
+    """Regression (v0.2.0 self-deadlock): the connection requesting update.apply must
+    get its reply and the restart must still happen — the apply may never block the
+    handler that asked for it."""
+    import asyncio
+    import websockets
+    from podium import protocol
+    from podium.gateway import Daemon
+    from podium.update import SelfUpdater
+
+    origin, install = repos
+    _release(origin, "0.9.9")
+    git(install, "fetch", "-q", "origin", "main")
+
+    d = Daemon(state_db=str(tmp_path / "s.db"), workdir=str(tmp_path / "w"))
+    restarted = asyncio.Event()
+
+    async def fake_restart():
+        restarted.set()
+
+    d.updater = SelfUpdater(d.sink, repo=str(install),
+                            install_cmd=["true"], restart_fn=fake_restart)
+    server = await d.serve(host="127.0.0.1", port=0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+        await ws.recv(); await ws.recv()  # hello + snapshot
+        await ws.send(protocol.dumps({"type": "update.apply"}))
+        async with asyncio.timeout(5):   # the deadlock made this reply never arrive
+            while True:
+                reply = protocol.loads(await ws.recv())
+                if reply["type"] == "narration" and "applying update" in reply["text"]:
+                    break
+        async with asyncio.timeout(10):
+            await restarted.wait()
+        assert d.updater.status()["behind"] == 0  # ff-merge actually happened
+        await ws.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+        d.state.close()
+
+
 async def test_failed_install_step_raises(repos):
     origin, install = repos
     u, _ = _updater(install, [])
