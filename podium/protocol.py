@@ -73,6 +73,11 @@ def narration(task_id: str | None, text: str) -> dict:
     return _f("narration", task_id=task_id, text=text)
 
 
+def update_available(installed: str, remote_version: str, behind: int) -> dict:
+    return _f("update.available", installed=installed,
+              remote_version=remote_version, behind=behind)
+
+
 def blocked(surface: str, stage: str, note: str = "") -> dict:
     """Decision 44: a surface that exists but is not yet functional answers
     `blocked` with its stage — never a fake, never a silent absence."""

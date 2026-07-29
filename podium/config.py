@@ -29,6 +29,8 @@ class Config:
     )
     # Test/dogfood hook: enable the mock worker.
     enable_mock: bool = os.environ.get("PODIUM_ENABLE_MOCK", "0") not in ("0", "false", "")
+    # Self-update watch interval in seconds; 0 disables the periodic check (spec 002).
+    update_check_s: int = int(os.environ.get("PODIUM_UPDATE_CHECK_S", "3600"))
 
     @property
     def ws_url(self) -> str:
