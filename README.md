@@ -13,7 +13,22 @@ reading material (read or listen), personalized to what you're building.
 - `research/` — design docs and research corpus (vision, architecture, capability analyses, SDLC research)
 - `docs/` — development process (`SDLC.md`) and architecture decision records (`adr/`)
 - `specs/` — feature specs and plans (spec-driven development; tasks live in the issue tracker, not here)
+- `podium/` — the implementation (`podiumd` daemon + `podium` CLI/TUI)
+- `tests/` — test suite (acceptance criteria are test-encoded per spec)
+
+## Quick start
+
+```sh
+pip install -e ".[dev]"   # Python 3.12+
+podiumd                    # the daemon (localhost WebSocket, SQLite state)
+podium tui                 # the cockpit
+podium --help              # work management + review from the shell
+pytest                     # the whole Stage-A acceptance suite
+```
 
 ## Status
 
-Pre-implementation. Design and research are complete; coding has not started.
+Stage A of V1 ("the loop lives" — `research/V1.md`): task loop with per-task git
+worktrees, live PTY sessions with takeover, full work model (hierarchy + dependency DAG +
+approval inbox), review gate, metering ledger with an honest quota gauge, and every
+later-stage surface present as an explicit `blocked` pane (research decision 44).

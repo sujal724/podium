@@ -1,0 +1,206 @@
+"""Dispatcher — the spine loop (V1 §1).
+
+claim → worktree → spawn worker → stream live (metered, rate-limit-scanned, hook-file
+tailed) → session exits → diff collected → task enters `review` → the operator approves
+(merge) or rejects (feedback + re-queue). `verifying` is passed through with an event —
+the state exists now, the verifier gates it in Stage C (decision 44: semantics never
+change, the gate just arrives).
+
+Stage A dispatch is operator-triggered (`task.run`) or `run_next()`; the autopilot tick
+over the DAG is a Stage C surface.
+"""
+
+import asyncio
+
+from podium import policy, protocol
+from podium.manager import SessionManager
+from podium.metering import Meter
+from podium.sink import Sink
+from podium.state import StateStore, now
+from podium.work.store import WorkStore
+from podium.workspace import GitError, WorkspaceManager
+
+HOOK_POLL_S = 0.5
+
+
+class DispatchError(RuntimeError):
+    pass
+
+
+class Dispatcher:
+    def __init__(self, work: WorkStore, manager: SessionManager,
+                 workspaces: WorkspaceManager, meter: Meter, sink: Sink,
+                 state: StateStore, default_worker: str = "claude") -> None:
+        self.work = work
+        self.manager = manager
+        self.workspaces = workspaces
+        self.meter = meter
+        self.sink = sink
+        self.state = state
+        self.default_worker = default_worker
+        self.running: dict[str, asyncio.Task] = {}   # task_id → runner
+
+    # --- dispatch -----------------------------------------------------------
+
+    async def run_task(self, task_id: str, worker: str | None = None) -> None:
+        """Claim a specific ready task and run it end-to-end (until `review`)."""
+        worker = worker or self._worker_for(task_id)
+        if not self.meter.gauge.may_dispatch(worker):
+            raise DispatchError(f"worker {worker} is rate-limited (backoff active)")
+        task = self.work.claim(worker, task_id)
+        if task is None:
+            raise DispatchError(f"task {task_id} is not claimable (not ready, or deps unmet)")
+        runner = asyncio.create_task(self._run(task.id, worker))
+        self.running[task.id] = runner
+        runner.add_done_callback(lambda _: self.running.pop(task.id, None))
+
+    async def run_next(self, worker: str | None = None) -> str | None:
+        """Claim the best ready task, if any. Returns its id."""
+        worker = worker or self.default_worker
+        if not self.meter.gauge.may_dispatch(worker):
+            return None
+        task = self.work.claim(worker)
+        if task is None:
+            return None
+        runner = asyncio.create_task(self._run(task.id, worker))
+        self.running[task.id] = runner
+        runner.add_done_callback(lambda _: self.running.pop(task.id, None))
+        return task.id
+
+    def _worker_for(self, task_id: str) -> str:
+        t = self.work.get_task(task_id)
+        if t.assignee and not t.assignee.startswith("human"):
+            return t.assignee
+        return self.default_worker
+
+    def _project(self, task) -> dict:
+        rows = self.state.query("SELECT * FROM projects WHERE id=?", (task.project_id,))
+        if not rows or not rows[0]["repo_root"]:
+            raise DispatchError(
+                f"task {task.id} has no project repo to run in "
+                "(set project.repo_root)")
+        return dict(rows[0])
+
+    # --- the loop body ------------------------------------------------------
+
+    async def _run(self, task_id: str, worker: str) -> None:
+        task = self.work.get_task(task_id)
+        started = now()
+        try:
+            proj = self._project(task)
+            wt = self.workspaces.create(proj["repo_root"], task_id,
+                                        proj["base_branch"])
+            self.work.update_task(task_id, actor="system", worktree=wt)
+            prompt = self._prompt(task)
+            self.work.set_status(task_id, "running", data={"worker": worker})
+            sess = await self.manager.spawn(worker, prompt, cwd=wt, task_id=task_id)
+            scan_q = self.sink.subscribe()
+            hook_offset = 0
+            try:
+                waiter = asyncio.create_task(sess.wait())
+                while not waiter.done():
+                    hook_offset = self._ingest_hooks(wt, sess.id, hook_offset)
+                    try:
+                        frame = await asyncio.wait_for(scan_q.get(), timeout=HOOK_POLL_S)
+                    except TimeoutError:
+                        continue
+                    if (frame.get("type") == "output"
+                            and frame.get("session_id") == sess.id):
+                        self.meter.scan_output(worker, sess.id, frame["text"])
+                exit_code = waiter.result()
+            finally:
+                self.sink.unsubscribe(scan_q)
+                self._ingest_hooks(wt, sess.id, hook_offset)
+            self.manager.mark_ended(sess.id)
+            self.meter.record_session(sess.id, task_id, worker, sess.kind,
+                                      started, now(),
+                                      "ok" if exit_code == 0 else f"exit:{exit_code}")
+            await self._finish(task_id, proj, exit_code)
+        except Exception as e:
+            self.work.set_status(task_id, "blocked", data={"error": str(e)})
+            self.sink.emit(protocol.error(f"task {task_id} failed to run", str(e)))
+
+    def _prompt(self, task) -> str:
+        parts = [policy.PREAMBLE_DENY, "", f"Task: {task.title}"]
+        if task.description:
+            parts += ["", task.description]
+        feedback = self.work.feedback(task.id)
+        if feedback:
+            parts += ["", "Previous review feedback (address it):"]
+            parts += [f"- {f.get('feedback', '')}" for f in feedback]
+        parts += ["", "Work only in this directory. Commit your changes when done, "
+                      "then exit."]
+        return "\n".join(parts)
+
+    def _ingest_hooks(self, worktree: str, session_id: str, offset: int) -> int:
+        events, new_offset = policy.read_hook_events(worktree, offset)
+        for ev in events:
+            self.state.log_event(session_id, "hook", ev)
+            name = ev.get("hook_event_name", "hook")
+            tool = ev.get("tool_name", "")
+            self.sink.emit(protocol.narration(
+                None, f"[{session_id}] {name}{f' {tool}' if tool else ''}"))
+        return new_offset
+
+    async def _finish(self, task_id: str, proj: dict, exit_code: int) -> None:
+        # `verifying` exists now; the verifier arrives in Stage C and will gate here.
+        self.work.set_status(task_id, "verifying",
+                             data={"verifier": "not wired (Stage C surface)"})
+        base = proj["base_branch"]
+        if not self.workspaces.has_commits(proj["repo_root"], task_id, base):
+            self.work.set_status(
+                task_id, "blocked",
+                data={"error": f"session exited ({exit_code}) with no commits on "
+                               f"{self.workspaces.branch(task_id)}"})
+            return
+        diff = self.workspaces.diff(proj["repo_root"], task_id, base)
+        self.work.set_status(task_id, "review", data={"exit_code": exit_code})
+        self.sink.emit(protocol.review_ready(
+            task_id, diff, self.workspaces.branch(task_id)))
+
+    # --- the review gate (decision 45) --------------------------------------
+
+    async def approve(self, task_id: str, actor: str = "human") -> None:
+        task = self.work.get_task(task_id)
+        if task.status != "review":
+            raise DispatchError(f"task {task_id} is not in review (status={task.status})")
+        proj = self._project(task)
+        try:
+            self.workspaces.approve(proj["repo_root"], task_id, proj["base_branch"])
+        except GitError as e:
+            self.work.set_status(task_id, "blocked", actor=actor,
+                                 data={"error": f"merge failed: {e}"})
+            raise
+        self.work.update_task(task_id, actor=actor, worktree=None, status="done")
+        self.sink.emit(protocol.narration(task_id, f"approved and merged by {actor}"))
+
+    async def reject(self, task_id: str, feedback: str, actor: str = "human") -> None:
+        task = self.work.get_task(task_id)
+        if task.status != "review":
+            raise DispatchError(f"task {task_id} is not in review (status={task.status})")
+        proj = self._project(task)
+        self.work._log(task_id, "review.rejected", actor, {"feedback": feedback})
+        self.workspaces.reject(proj["repo_root"], task_id)
+        self.work.update_task(task_id, actor=actor, worktree=None, status="ready")
+        self.sink.emit(protocol.narration(
+            task_id, f"rejected by {actor}; re-queued with feedback"))
+
+    # --- durability seed (decision 23) --------------------------------------
+
+    def resume_interrupted(self) -> list[str]:
+        """On daemon boot: interrupted assigned/running tasks → ready (re-dispatch);
+        open sessions marked interrupted. Live resume/fork is a later increment."""
+        requeued = []
+        for r in self.state.query(
+                "SELECT id FROM tasks WHERE status IN ('assigned','running')"):
+            self.work.set_status(r["id"], "ready", actor="system",
+                                 data={"reason": "daemon restart — re-queued"})
+            requeued.append(r["id"])
+        self.state.execute(
+            "UPDATE sessions SET status='interrupted', ended_at=?"
+            " WHERE ended_at IS NULL AND status NOT IN ('exited','error')",
+            (now(),))
+        if requeued:
+            self.sink.emit(protocol.narration(
+                None, f"auto-resume: re-queued {len(requeued)} interrupted task(s)"))
+        return requeued
