@@ -19,6 +19,7 @@ from podium.sink import Sink
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[=>]")
 _WS = re.compile(r"\s+")
+_CHOICE = re.compile(r"^[\s❯>]*([1-9])[.)]\s+(\S.*?)\s*$")
 TAIL_CHARS = 2000
 
 
@@ -28,6 +29,27 @@ def canonicalize(text: str) -> str:
     return _WS.sub("", _ANSI.sub("", text)).lower()
 
 
+def strip_ansi(text: str) -> str:
+    """ANSI-stripped but layout-preserving — used to read a prompt's own options."""
+    return _ANSI.sub("", text)
+
+
+def parse_choices(text: str) -> list[str]:
+    """Pull a prompt's numbered options ('1. Yes', '2. No') out of screen text,
+    so Podium offers exactly what the worker offers — never a guessed menu."""
+    found: dict[int, str] = {}
+    for line in text.splitlines():
+        m = _CHOICE.match(line)
+        if m:
+            found[int(m.group(1))] = m.group(2)[:80]
+    out = []
+    for i in range(1, 10):
+        if i not in found:
+            break
+        out.append(found[i])
+    return out
+
+
 @dataclass(frozen=True)
 class PromptPattern:
     id: str                      # stable kind, e.g. "claude.trust"
@@ -35,6 +57,7 @@ class PromptPattern:
     needle: str                  # sought in the canonicalized tail
     question: str                # Podium's phrasing of the worker's question
     choices: tuple[tuple[str, str], ...]   # (label shown, bytes written on pick)
+    dynamic: bool = False        # read the options off the screen instead
 
 
 PATTERNS: list[PromptPattern] = [
@@ -51,7 +74,41 @@ PATTERNS: list[PromptPattern] = [
         "Take over the terminal to authenticate, or stop the session.",
         (("Stop the session", "\x03"),),
     ),
+    # Permission/approval prompts: the worker's own options are read off the
+    # screen, so Podium relays exactly what it offers (tool approvals vary).
+    PromptPattern(
+        "claude.permission", ("claude", "mock"), "doyouwanttoproceed",
+        "The worker needs your approval to proceed (see the session pane for the "
+        "command).", (), dynamic=True,
+    ),
+    # Bypass mode's own risk acceptance. Podium NEVER answers this itself — the
+    # operator accepts the risk or doesn't, whatever mode was requested.
+    PromptPattern(
+        "claude.bypass_accept", ("claude",), "youacceptallresponsibility",
+        "Bypass mode asks you to accept full responsibility for unprompted actions "
+        "in this session. Podium will not answer this for you.", (), dynamic=True,
+    ),
 ]
+
+# What a live session's permission mode looks like in the CLI's own status line,
+# and the mode each maps to. Used to switch modes on a RUNNING session (spec 006).
+MODE_MARKERS = {
+    "bypassinglepermissions": "bypass",
+    "bypasspermissionson": "bypass",
+    "acceptedidson": "autonomous",
+    "accepteditson": "autonomous",
+    "planmodeon": "plan",
+}
+CYCLE_KEY = "\x1b[Z"        # shift+tab — the CLI's own mode cycle
+
+
+def detect_mode(text: str) -> str | None:
+    """Read the session's current permission mode off its status line."""
+    flat = canonicalize(text)
+    for marker, mode in MODE_MARKERS.items():
+        if marker in flat:
+            return mode
+    return None
 
 
 @dataclass
@@ -59,32 +116,48 @@ class PendingQuestion:
     id: str
     session_id: str
     pattern: PromptPattern
+    choices: tuple[str, ...] = ()   # labels actually offered (dynamic prompts)
 
 
 class InteractionLayer:
     def __init__(self, sink: Sink) -> None:
         self.sink = sink
         self._tails: dict[str, str] = {}
+        self._raw_tails: dict[str, str] = {}
         self._asked: dict[str, set[str]] = {}
+        self._seq = 0
         self.pending: dict[str, PendingQuestion] = {}
 
     def scan(self, session_id: str, worker: str, text: str) -> PendingQuestion | None:
-        """Feed a chunk of session output; returns (and emits) a question if a known
-        prompt just appeared. One question per pattern per session."""
+        """Feed a chunk of session output; emits a question when a known prompt
+        appears. A pattern re-arms once its prompt leaves the screen, so each new
+        approval is asked again (they are separate decisions)."""
         tail = (self._tails.get(session_id, "") + canonicalize(text))[-TAIL_CHARS:]
         self._tails[session_id] = tail
+        raw = (self._raw_tails.get(session_id, "") + strip_ansi(text))[-TAIL_CHARS * 3:]
+        self._raw_tails[session_id] = raw
         asked = self._asked.setdefault(session_id, set())
+        asked.intersection_update({p.id for p in PATTERNS if p.needle in tail})
+
         for p in PATTERNS:
-            if worker in p.workers and p.needle in tail and p.id not in asked:
-                asked.add(p.id)
-                qid = f"{session_id}:{p.id}"
-                pending = PendingQuestion(qid, session_id, p)
-                self.pending[qid] = pending
-                self.sink.emit(protocol.question(session_id, {
-                    "id": qid, "q": p.question, "kind": "choice",
-                    "choices": [label for label, _ in p.choices],
-                }))
-                return pending
+            if worker not in p.workers or p.needle not in tail or p.id in asked:
+                continue
+            if p.dynamic:
+                labels = tuple(parse_choices(raw))
+                if not labels:
+                    continue          # options not on screen yet — ask next chunk
+            else:
+                labels = tuple(label for label, _ in p.choices)
+            asked.add(p.id)
+            self._seq += 1
+            qid = f"{session_id}:{p.id}:{self._seq}"
+            pending = PendingQuestion(qid, session_id, p, labels)
+            self.pending[qid] = pending
+            self.sink.emit(protocol.question(session_id, {
+                "id": qid, "q": p.question, "kind": "choice",
+                "choices": list(labels),
+            }))
+            return pending
         return None
 
     def answer_bytes(self, question_id: str, value) -> str:
@@ -93,8 +166,16 @@ class InteractionLayer:
         pending = self.pending.pop(question_id, None)
         if pending is None:
             return str(value) + "\r"
-        choices = pending.pattern.choices
         v = str(value).strip()
+        if pending.pattern.dynamic:
+            # the worker's own menu: the number is the answer
+            if v.isdigit() and 1 <= int(v) <= len(pending.choices):
+                return v + "\r"
+            for i, label in enumerate(pending.choices, start=1):
+                if v.lower() == label.lower():
+                    return f"{i}\r"
+            return v + "\r"
+        choices = pending.pattern.choices
         if v.isdigit() and 1 <= int(v) <= len(choices):
             return choices[int(v) - 1][1]
         for label, write in choices:
@@ -104,6 +185,7 @@ class InteractionLayer:
 
     def forget_session(self, session_id: str) -> None:
         self._tails.pop(session_id, None)
+        self._raw_tails.pop(session_id, None)
         self._asked.pop(session_id, None)
         for qid in [q for q, p in self.pending.items()
                     if p.session_id == session_id]:

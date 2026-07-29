@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, project_id TEXT, parent_id
     priority INT DEFAULT 2, labels JSON, assignee TEXT,
     origin TEXT DEFAULT 'human', detector TEXT, approved_by TEXT, approved_at INT,
     resources JSON, workflow TEXT, autonomy TEXT, worktree TEXT,
+    base_ref TEXT,                     -- explicit branch to build on;
+                                       -- else the parent task's branch, else project base
     created_at INT, updated_at INT);
 CREATE TABLE IF NOT EXISTS task_deps(from_task TEXT, to_task TEXT,
     kind TEXT DEFAULT 'blocked-by', origin TEXT DEFAULT 'human',
@@ -62,6 +64,15 @@ CREATE TABLE IF NOT EXISTS tms_links(native_id TEXT, adapter TEXT, external_id T
     source_of_truth TEXT, synced_at INT);
 CREATE TABLE IF NOT EXISTS resources(id TEXT PRIMARY KEY, task_id TEXT, url TEXT,
     path TEXT, kind TEXT, status TEXT, ingested_at INT);
+-- agent tree (spec 007): every actor Podium knows about, in one hierarchy —
+-- worker sessions, their native subagents, and peer-harness invocations.
+CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, task_id TEXT, session_id TEXT,
+    parent_id TEXT,            -- another agents.id (subagent of / spawned by)
+    kind TEXT,                 -- "session" | "subagent" | "peer"
+    worker TEXT, label TEXT, detail TEXT,
+    status TEXT,               -- running | done | blocked | error
+    started_at INT, ended_at INT, data JSON);
+CREATE INDEX IF NOT EXISTS agents_task ON agents(task_id);
 -- quota (LLD §8.3)
 CREATE TABLE IF NOT EXISTS quota_ledger(id INTEGER PRIMARY KEY, worker TEXT, window TEXT,
     spent REAL, budget REAL, window_start INT, window_reset INT, ts INT);

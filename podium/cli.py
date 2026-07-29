@@ -156,6 +156,37 @@ def cmd_sessions(args) -> None:
             print(line)
 
 
+MARK = {"workspace": "▣", "project": "▸", "task": "•",
+        "session": "◆", "subagent": "└─◇", "peer": "⚠"}
+
+
+def cmd_tree(args) -> None:
+    """With a task id: everything working on that task. Without: the whole
+    hierarchy — workspace → project → task → session → subagent/peer."""
+    if not args.task_id:
+        frames = asyncio.run(_rpc({"type": "agents.scope"}))
+        for f in frames:
+            if f["type"] != "agents.scope":
+                _print([f]); continue
+            for n in f["nodes"]:
+                st = f" [{n['status']}]" if n.get("status") else ""
+                print(f"{'  ' * n['depth']}{MARK.get(n['kind'], '·')} "
+                      f"{n['label']}{st}")
+        return
+    frames = asyncio.run(_rpc({"type": "agents.tree", "task_id": args.task_id}))
+    for f in frames:
+        if f["type"] != "agents.tree":
+            _print([f]); continue
+        if not f["agents"]:
+            print("no agents recorded for this task yet")
+        for a in f["agents"]:
+            pad = "  " * a["depth"]
+            mark = MARK.get(a["kind"], "·")
+            detail = (a.get("detail") or "")[:70]
+            print(f"{pad}{mark} {a['label']} [{a['status']}] {a['kind']}"
+                  f"{'  ' + detail if detail else ''}")
+
+
 def cmd_open(args) -> None:
     """Drop into a task's worktree and resume its exact Claude session in THIS
     terminal (falls back to --continue when the session id isn't captured yet)."""
@@ -268,6 +299,9 @@ def main() -> None:
 
     sub.add_parser("sessions", help="list sessions with claude resume commands"
                    ).set_defaults(fn=cmd_sessions)
+
+    s = sub.add_parser("tree", help="hierarchy: workspace→project→task→session→agents")
+    s.add_argument("task_id", nargs="?"); s.set_defaults(fn=cmd_tree)
 
     s = sub.add_parser("review"); s.add_argument("task_id"); s.set_defaults(fn=cmd_review)
     s = sub.add_parser("approve"); s.add_argument("task_id"); s.set_defaults(fn=cmd_approve)

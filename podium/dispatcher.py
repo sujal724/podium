@@ -13,6 +13,7 @@ over the DAG is a Stage C surface.
 import asyncio
 
 from podium import policy, protocol
+from podium.agents import AgentTree
 from podium.config import CONFIG
 from podium.manager import SessionManager
 from podium.metering import Meter
@@ -42,6 +43,7 @@ class Dispatcher:
         self.running: dict[str, asyncio.Task] = {}   # task_id → runner
         self._linked: set[str] = set()               # sessions with resume_key stored
         self.winsize = None                          # () -> (rows, cols) | None
+        self.agents = AgentTree(state, sink)         # spec 007: who is working
 
     # --- dispatch -----------------------------------------------------------
 
@@ -91,22 +93,39 @@ class Dispatcher:
         started = now()
         try:
             proj = self._project(task)
-            wt = self.workspaces.create(proj["repo_root"], task_id,
-                                        proj["base_branch"])
+            base_ref = self.base_ref_for(task, proj)
+            wt = self.workspaces.create(proj["repo_root"], task_id, base_ref)
+            if base_ref != proj["base_branch"]:
+                self.sink.emit(protocol.narration(
+                    task_id, f"branching off {base_ref} (parent task's branch)"))
             self.work.update_task(task_id, actor="system", worktree=wt)
             prompt = self._prompt(task)
             self.work.set_status(task_id, "running", data={"worker": worker})
             ws = self.winsize() if self.winsize else None
+            resume_key = self.resume_key_for(task_id, worker)
+            if resume_key:
+                self.sink.emit(protocol.narration(
+                    task_id, f"resuming {worker} session {resume_key[:8]}… "
+                             "(continues where it stopped)"))
+            autonomy = self.autonomy_for(task, proj)
             sess = await self.manager.spawn(worker, prompt, cwd=wt, task_id=task_id,
                                             rows=ws[0] if ws else None,
-                                            cols=ws[1] if ws else None)
+                                            cols=ws[1] if ws else None,
+                                            resume_key=resume_key, autonomy=autonomy)
+            self.sink.emit(protocol.narration(
+                task_id, f"[{sess.id}] {worker} · mode: {autonomy} "
+                         f"({policy.AUTONOMY_MODES.get(autonomy, '')})"))
+            self.agents.open_session(sess.id, task_id, worker,
+                                     detail=task.title,
+                                     data={"autonomy": autonomy, "cwd": wt})
             scan_q = self.sink.subscribe()
-            hook_offset = 0
+            hook_offset = peer_offset = 0
             try:
                 waiter = asyncio.create_task(sess.wait())
                 while not waiter.done():
                     hook_offset = self._ingest_hooks(wt, sess.id, hook_offset,
                                                      repo_root=proj["repo_root"])
+                    peer_offset = self._ingest_peers(wt, sess.id, peer_offset)
                     try:
                         frame = await asyncio.wait_for(scan_q.get(), timeout=HOOK_POLL_S)
                     except TimeoutError:
@@ -119,6 +138,9 @@ class Dispatcher:
                 self.sink.unsubscribe(scan_q)
                 self._ingest_hooks(wt, sess.id, hook_offset,
                                    repo_root=proj["repo_root"])
+                self._ingest_peers(wt, sess.id, peer_offset)
+                self.agents.close_session(
+                    sess.id, "done" if sess.exit_code == 0 else "error")
             self.manager.mark_ended(sess.id)
             self.meter.record_session(sess.id, task_id, worker, sess.kind,
                                       started, now(),
@@ -127,6 +149,48 @@ class Dispatcher:
         except Exception as e:
             self.work.set_status(task_id, "blocked", data={"error": str(e)})
             self.sink.emit(protocol.error(f"task {task_id} failed to run", str(e)))
+
+    def base_ref_for(self, task, proj: dict) -> str:
+        """Branches mirror the task tree: an explicit `base_ref` wins, else a
+        subtask builds on its PARENT's branch (created if the parent hasn't run
+        yet), else the project's base branch. So base → b → subtask-of-b stacks."""
+        if task.base_ref:
+            return task.base_ref
+        if task.parent_id:
+            parent = self.work.get_task(task.parent_id)
+            parent_base = self.base_ref_for(parent, proj)
+            return self.workspaces.ensure_branch(proj["repo_root"], parent.id,
+                                                 parent_base)
+        return proj["base_branch"]
+
+    def autonomy_for(self, task, proj: dict) -> str:
+        """Task overrides project overrides the daemon default (decision 7's
+        spectrum, per-scope). Unknown values fall back to supervised — the safe end."""
+        for candidate in (getattr(task, "autonomy", None), proj.get("autonomy"),
+                          CONFIG.autonomy):
+            if candidate in policy.AUTONOMY_MODES:
+                return candidate
+        return policy.DEFAULT_AUTONOMY
+
+    def resume_key_for(self, task_id: str, worker: str) -> str | None:
+        """The worker session id to continue for this task, if its last session was
+        interrupted (update/restart/crash) rather than finished. A rejected task
+        starts fresh — the operator's feedback should reshape the work, not append
+        to a conversation that already went the wrong way (spec 005)."""
+        rows = self.state.query(
+            "SELECT resume_key FROM sessions WHERE task_id=? AND worker=?"
+            " AND resume_key IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            (task_id, worker))
+        if not rows:
+            return None
+        events = self.state.query(
+            "SELECT type FROM task_events WHERE task_id=? AND type IN"
+            " ('interrupted','review.rejected') ORDER BY id DESC LIMIT 1", (task_id,))
+        # ordered by rowid, not ts: two events in the same second must still
+        # resolve to the later one
+        if events and events[0]["type"] == "interrupted":
+            return rows[0]["resume_key"]
+        return None
 
     def _prompt(self, task) -> str:
         parts = [policy.PREAMBLE_DENY, "", f"Task: {task.title}"]
@@ -149,9 +213,32 @@ class Dispatcher:
             tool = ev.get("tool_name", "")
             self.sink.emit(protocol.narration(
                 None, f"[{session_id}] {name}{f' {tool}' if tool else ''}"))
+            # subagent lifecycle → the agent tree (spec 007)
+            if name == "PreToolUse" and tool == "Task":
+                ti = ev.get("tool_input") or {}
+                self.agents.open_subagent(
+                    session_id,
+                    ti.get("subagent_type") or ti.get("description") or "subagent",
+                    (ti.get("description") or ti.get("prompt") or "")[:300],
+                    data={"tool_input": ti}, key=ev.get("tool_use_id"))
+            elif name == "PostToolUse" and tool == "Task":
+                # correlated close: subagents run in parallel, so pair by id
+                self.agents.close_subagent(session_id, ev.get("tool_use_id"))
+            elif name == "SubagentStop":
+                self.agents.close_subagent(session_id, ev.get("tool_use_id"))
             claude_sid = ev.get("session_id")
             if claude_sid and session_id not in self._linked:
                 self._link_claude_session(session_id, claude_sid, worktree, repo_root)
+        return new_offset
+
+    def _ingest_peers(self, worktree: str, session_id: str, offset: int) -> int:
+        """Peer-harness attempts reported by the PATH shims — recorded whatever the
+        autonomy mode, so bypass can never make one invisible (spec 007)."""
+        events, new_offset = policy.read_peer_events(worktree, offset)
+        for ev in events:
+            self.agents.record_peer(
+                ev.get("session") or session_id, ev.get("binary", "?"),
+                ev.get("command", ""), ev.get("outcome", "blocked"))
         return new_offset
 
     def _link_claude_session(self, session_id: str, claude_sid: str,
@@ -188,7 +275,7 @@ class Dispatcher:
         # `verifying` exists now; the verifier arrives in Stage C and will gate here.
         self.work.set_status(task_id, "verifying",
                              data={"verifier": "not wired (Stage C surface)"})
-        base = proj["base_branch"]
+        base = self.base_ref_for(self.work.get_task(task_id), proj)
         if not self.workspaces.has_commits(proj["repo_root"], task_id, base):
             self.work.set_status(
                 task_id, "blocked",
@@ -207,14 +294,39 @@ class Dispatcher:
         if task.status != "review":
             raise DispatchError(f"task {task_id} is not in review (status={task.status})")
         proj = self._project(task)
+        # Children are stacked ON this task's branch and approve deletes it — so a
+        # parent cannot land while any child is unfinished (spec 008). This is also
+        # the work model: a parent is its decomposition; it is done when its parts are.
+        unfinished = [r["id"] for r in self.state.query(
+            "WITH RECURSIVE kids(id) AS ("
+            "  SELECT id FROM tasks WHERE parent_id=:root"
+            "  UNION ALL SELECT t.id FROM tasks t JOIN kids k ON t.parent_id=k.id)"
+            " SELECT k.id FROM kids k JOIN tasks t ON t.id=k.id"
+            " WHERE t.status NOT IN ('done','discarded')", {"root": task_id})]
+        if unfinished:
+            raise DispatchError(
+                f"task {task_id} has unfinished subtasks ({', '.join(unfinished)}); "
+                "they branch off it, so they must land (or be discarded) first")
+        base = self.base_ref_for(task, proj)
         try:
-            self.workspaces.approve(proj["repo_root"], task_id, proj["base_branch"])
+            self.workspaces.approve(proj["repo_root"], task_id, base)
         except GitError as e:
             self.work.set_status(task_id, "blocked", actor=actor,
                                  data={"error": f"merge failed: {e}"})
             raise
         self.work.update_task(task_id, actor=actor, worktree=None, status="done")
-        self.sink.emit(protocol.narration(task_id, f"approved and merged by {actor}"))
+        self.sink.emit(protocol.narration(
+            task_id, f"approved by {actor} — merged into {base}"))
+        # Siblings stacked on the same base now sit on an older commit: their diffs
+        # stay correct (three-dot), but they should pick the change up.
+        if task.parent_id:
+            for r in self.state.query(
+                    "SELECT id FROM tasks WHERE parent_id=? AND id!=? AND status IN"
+                    " ('ready','running','review','blocked')",
+                    (task.parent_id, task_id)):
+                self.sink.emit(protocol.narration(
+                    r["id"], f"base advanced: sibling {task_id} landed on {base} — "
+                             "re-run or merge the base in to pick it up"))
 
     async def reject(self, task_id: str, feedback: str, actor: str = "human") -> None:
         task = self.work.get_task(task_id)

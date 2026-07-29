@@ -62,10 +62,40 @@ def test_approve_conflict_surfaces(tmp_path, repo):
     assert status.strip() == ""
 
 
-def test_approve_refuses_wrong_checkout(tmp_path, repo):
+def test_approve_works_when_checkout_is_elsewhere(tmp_path, repo):
+    """New contract (spec 008): the merge runs in whichever worktree hosts the base
+    ref — or a scratch one — so approving never depends on where your checkout sits.
+    Required for stacked branches, where the base is another task's branch."""
     wm = WorkspaceManager(str(tmp_path / "work"))
     wm.create(str(repo), "t_4", "main")
     _commit_in(tmp_path / "work" / "worktrees" / "t_4")
-    git(repo, "checkout", "-b", "elsewhere")
-    with pytest.raises(GitError):
-        wm.approve(str(repo), "t_4", "main")
+    git(repo, "checkout", "-q", "-b", "elsewhere")
+    wm.approve(str(repo), "t_4", "main")
+    merged = subprocess.run(["git", "-C", str(repo), "log", "--oneline", "main"],
+                            capture_output=True, text=True).stdout
+    assert "add f.txt" in merged
+
+
+def test_branch_tree_stacks_on_parent(tmp_path, repo):
+    """A subtask branches off its PARENT's branch and merges back into it — the
+    branch structure mirrors the task tree (spec 008)."""
+    wm = WorkspaceManager(str(tmp_path / "work"))
+    parent_branch = wm.ensure_branch(str(repo), "t_p", "main")   # parent never ran
+    assert parent_branch == "task/t_p"
+    wm.create(str(repo), "t_p", "main")
+    _commit_in(tmp_path / "work" / "worktrees" / "t_p", "parent.txt")
+    # child b and child c both branch off the parent's branch
+    for child in ("t_b", "t_c"):
+        wm.create(str(repo), child, parent_branch)
+        _commit_in(tmp_path / "work" / "worktrees" / child, f"{child}.txt")
+        assert (tmp_path / "work" / "worktrees" / child / "parent.txt").exists()
+        # the child's diff shows only ITS work, not the parent's
+        assert f"{child}.txt" in wm.diff(str(repo), child, parent_branch)
+        assert "parent.txt" not in wm.diff(str(repo), child, parent_branch)
+    wm.approve(str(repo), "t_b", parent_branch)        # merges into the parent branch
+    log = subprocess.run(["git", "-C", str(repo), "log", "--oneline", parent_branch],
+                         capture_output=True, text=True).stdout
+    assert "add t_b.txt" in log and "add t_c.txt" not in log
+    assert "add t_b.txt" not in subprocess.run(
+        ["git", "-C", str(repo), "log", "--oneline", "main"],
+        capture_output=True, text=True).stdout          # main untouched until parent lands
