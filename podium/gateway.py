@@ -133,6 +133,14 @@ class Daemon:
         await self.manager.write(f["session_id"], f["text"])
 
     async def on_answer(self, f: dict) -> None:
+        # A peer-call approval is answered to the daemon, not typed into the PTY.
+        qid = str(f.get("question_id", ""))
+        if qid.startswith("peer:"):
+            allow = str(f["value"]).strip() in ("1", "y", "yes", "approve",
+                                                "Approve — run it")
+            self.dispatcher.answer_peer(qid[len("peer:"):], allow,
+                                        f.get("actor", "human"))
+            return
         # Known prompts translate to the exact keystrokes the worker's dialog expects;
         # anything else is a generic line answer. Native callbacks are Stage B.
         data = self.interaction.answer_bytes(f.get("question_id", ""), f["value"])

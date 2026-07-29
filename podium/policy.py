@@ -38,7 +38,25 @@ def write_peer_shims(worktree: str) -> Path:
     """
     bin_dir = Path(worktree) / ".podium" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
-    log = peer_log_path(worktree)
+    pdir = Path(worktree) / ".podium"
+    for name in PEER_BINARIES:
+        shim = bin_dir / name
+        # The shim BROKERS, it does not decide: it files a request with provenance
+        # and waits for the daemon, which answers by the session's autonomy mode
+        # (supervised asks the operator; autonomous/bypass auto-approve). Podium can
+        # launch anything — permission is a mode question (spec 009).
+        shim.write_text(
+            "#!/bin/sh\n"
+            f'PODIUM_DIR={json.dumps(str(pdir))} exec {json.dumps(sys.executable)}'
+            f' -m podium.peer_shim {name} "$@"\n'
+        )
+        shim.chmod(0o755)
+    return bin_dir
+
+
+def _legacy_shim(bin_dir: Path, log: Path) -> None:
+    """Superseded by the broker above; kept only as documentation of the old
+    unconditional deny (spec 009 replaces it)."""
     for name in PEER_BINARIES:
         shim = bin_dir / name
         # Report first, refuse second: Podium sees every peer attempt (with the

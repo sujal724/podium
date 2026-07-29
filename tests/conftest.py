@@ -6,6 +6,8 @@ import subprocess
 # so tests never touch the network.
 os.environ["PODIUM_ENABLE_MOCK"] = "1"
 os.environ["PODIUM_UPDATE_CHECK_S"] = "0"
+# peer shims wait for the daemon's brokering decision; keep tests snappy
+os.environ["PODIUM_PEER_WAIT_S"] = "2"
 
 import pytest
 
