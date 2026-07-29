@@ -12,8 +12,7 @@ from pathlib import Path
 from podium import policy
 from podium.config import CONFIG
 from podium.sessions.base import Session
-from podium.sessions.pty import PtySession
-from podium.sessions.tmux import TmuxSession, available as tmux_available
+from podium.sessions.tmux import TmuxSession
 from podium.sink import Sink
 from podium.workers.base import Availability, Worker, register
 
@@ -59,8 +58,8 @@ class ClaudeWorker(Worker):
             argv += ["--resume", resume_key]
         if prompt:
             argv.append(prompt)
+        # Real terminal, always (spec 010 rev 2): Podium does not re-render a
+        # worker's UI. tmux is required; its absence is a stated error, not a
+        # silent downgrade to an emulated pane.
         env = policy.worker_env(cwd, session_id=sid)
-        if CONFIG.term_backend == "tmux" or (
-                CONFIG.term_backend == "auto" and tmux_available()):
-            return TmuxSession(sid, self.name, cwd, sink, argv, env=env)
-        return PtySession(sid, self.name, cwd, sink, argv, env=env)
+        return TmuxSession(sid, self.name, cwd, sink, argv, env=env)

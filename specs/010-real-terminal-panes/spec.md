@@ -59,3 +59,21 @@ terminal. A multiplexer gives it a real terminal *without* taking over the whole
 — which is exactly the operator's request, and removes an entire class of rendering
 bugs (stacking repaints, wide-glyph drift, colour mapping) rather than fixing them one
 at a time.
+
+## Rev 2 (2026-07-29) — the emulator is deleted, tmux is the way
+
+Operator ruling: *"Remove the viewport that was replicating the Claude terminal — use
+tmux always, only that is the way."*
+
+- `podium/tui/term.py` (the pyte emulator and its pane) is **deleted**, along with its
+  tests and the `pyte` dependency. Podium no longer re-renders a worker's UI anywhere.
+- Coding workers (`claude`, `gemini`, `codex`) **always** run in a real terminal
+  (`TmuxSession`). There is no emulated fallback and no backend switch: a missing
+  multiplexer is a stated error, not a silent downgrade (decision 44).
+- The cockpit's session tab shows what the session is and how to reach its real
+  terminal (`podium term`, `tmux attach -t podium-<sid>`, `ctrl+o`) — never a redraw.
+- The daemon's visibility is unchanged: it reads the captured pane bytes, so board,
+  metering, prompts, hooks, peer brokering and the agent tree all work as before.
+
+The in-process `PtySession` remains only as the test harness transport for the mock
+worker; no operator-facing surface renders a terminal.

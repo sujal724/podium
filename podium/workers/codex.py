@@ -27,5 +27,5 @@ class CodexWorker(Worker):
     def make_session(self, sid: str, sink: Sink, cwd: str, prompt: str,
                      kind: str | None = None, resume_key: str | None = None,
                      autonomy: str = "supervised") -> Session:
-        from podium.sessions.pty import PtySession
-        return PtySession(sid, self.name, cwd, sink, ["codex"])
+        from podium.sessions.tmux import TmuxSession
+        return TmuxSession(sid, self.name, cwd, sink, ["codex"])

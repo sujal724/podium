@@ -31,9 +31,6 @@ class Config:
     enable_mock: bool = os.environ.get("PODIUM_ENABLE_MOCK", "0") not in ("0", "false", "")
     # Self-update watch interval in seconds; 0 disables the periodic check (spec 002).
     update_check_s: int = int(os.environ.get("PODIUM_UPDATE_CHECK_S", "3600"))
-    # How worker sessions are displayed: "tmux" = a REAL terminal pane (spec 010),
-    # "pty" = the emulated cockpit pane. "auto" prefers tmux when installed.
-    term_backend: str = os.environ.get("PODIUM_TERM_BACKEND", "auto")
     # Default autonomy for worker sessions: supervised | autonomous (per-task and
     # per-project overrides win). See policy.AUTONOMY_MODES.
     autonomy: str = os.environ.get("PODIUM_AUTONOMY", "supervised")

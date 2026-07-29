@@ -17,7 +17,7 @@ from podium.config import CONFIG
 async def _rpc(frame: dict, wait_types: tuple[str, ...] = ()) -> list[dict]:
     """Send one frame; collect the direct reply (and any wait_types frames)."""
     out = []
-    async with websockets.connect(CONFIG.ws_url) as ws:
+    async with websockets.connect(CONFIG.ws_url, max_size=16 * 1024 * 1024) as ws:
         # consume hello + snapshot
         await ws.recv()
         await ws.recv()
@@ -110,7 +110,7 @@ def cmd_quota(args) -> None:
 
 def cmd_workers(args) -> None:
     async def get():
-        async with websockets.connect(CONFIG.ws_url) as ws:
+        async with websockets.connect(CONFIG.ws_url, max_size=16 * 1024 * 1024) as ws:
             return protocol.loads(await ws.recv())  # hello carries posture
     hello = asyncio.run(get())
     for w in hello["workers"]:

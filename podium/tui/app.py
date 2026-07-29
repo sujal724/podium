@@ -22,7 +22,6 @@ from textual.widgets import (Button, Footer, Header, Input, Label, RichLog, Stat
 from podium import protocol
 from podium.config import CONFIG
 from podium.surfaces import blocked_surfaces
-from podium.tui.term import TerminalEmulator, TerminalView
 
 
 class QuestionDialog(ModalScreen):
@@ -59,7 +58,7 @@ class Cockpit(App):
     #board { width: 34%; border: solid $primary; }
     #main  { width: 66%; }
     #review-log, #feed-log { border: solid $primary; height: 1fr; }
-    #session-view { border: solid $primary; height: 1fr; }
+    #session-log { border: solid $primary; height: 1fr; }
     #session-bar { height: 1; background: $primary-darken-2; color: $text; }
     #workers { height: 4; border: solid $secondary; }
     #quota { height: 3; border: solid $warning; }
@@ -75,8 +74,6 @@ class Cockpit(App):
         Binding("ctrl+t", "focus_takeover", "takeover"),
         Binding("ctrl+o", "open_in_claude", "open in claude"),
         Binding("ctrl+p", "change_mode", "change mode"),
-        Binding("pageup", "page_back", "scroll back"),
-        Binding("pagedown", "page_forward", "scroll fwd"),
         Binding("ctrl+b", "focus_board", "board"),
         Binding("ctrl+q", "quit", "quit"),
         Binding("escape", "send_escape", "esc → session"),
@@ -88,7 +85,6 @@ class Cockpit(App):
         self.selected_session: str | None = None
         self.selected_task: str | None = None
         self.review_task: str | None = None
-        self.emulators: dict[str, TerminalEmulator] = {}
         self.session_info: dict[str, dict] = {}
 
     def _update_session_bar(self) -> None:
@@ -109,46 +105,21 @@ class Cockpit(App):
         bar.update(f" {sid} · {info.get('label', '?')} · {mode_txt}{resumed}"
                    f" · ctrl+o open in claude · ctrl+t takeover")
 
-    def _emulator(self, sid: str) -> TerminalEmulator:
-        if sid not in self.emulators:
-            self.emulators[sid] = TerminalEmulator()
-        return self.emulators[sid]
-
     def _select_session(self, sid: str) -> None:
         self.selected_session = sid
-        self.query_one("#session-view", TerminalView).attach(self._emulator(sid))
-        self._sync_pty_size()
         self._update_session_bar()
-
-    def _viewport(self) -> tuple[int, int] | None:
-        """PTY size = the scroll container's viewport (rows) × content width
-        (cols, minus scrollbar); the view itself is content-tall."""
-        try:
-            view = self.query_one("#session-view", TerminalView)
-        except Exception:
-            return None
-        area = view.content_size
-        if area.height <= 2 or area.width <= 10:
-            return None
-        return area.height, max(10, area.width - 1)
-
-    def _sync_pty_size(self) -> None:
-        vp = self._viewport()
-        if vp is None:
-            return
-        rows, cols = vp
-        sid = self.selected_session
-        if sid is not None:
-            self._emulator(sid).resize(rows, cols)
-            asyncio.create_task(self._send(
-                {"type": "resize", "session_id": sid, "rows": rows, "cols": cols}))
-        # daemon remembers the pane size and spawns future PTYs to match, so
-        # sessions never start at a mismatched width (the interleave glitch)
-        asyncio.create_task(self._send(
-            {"type": "winsize", "rows": rows, "cols": cols}))
-
-    def on_resize(self, event) -> None:
-        self._sync_pty_size()
+        log = self.query_one("#session-log", RichLog)
+        log.clear()
+        info = self.session_info.get(sid, {})
+        log.write(f"session {sid} ({info.get('label', '?')}) runs in a REAL terminal.")
+        log.write("")
+        log.write("  podium term              cockpit + this session, side by side")
+        log.write(f"  tmux attach -t podium-{sid}   attach to it directly")
+        log.write("  ctrl+o                   hand this terminal to the session")
+        log.write("")
+        log.write("Podium is not re-rendering the worker's UI (spec 010): its output "
+                  "is captured for the board, metering, prompts and the agent tree, "
+                  "but the terminal itself is yours to attach to.")
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -162,7 +133,7 @@ class Cockpit(App):
                 with TabbedContent():
                     with TabPane("session", id="tab-session"):
                         yield Static("no session", id="session-bar")
-                        yield TerminalView(id="session-view")
+                        yield RichLog(id="session-log", wrap=True)
                         yield Input(placeholder="takeover — text goes to the live "
                                                 "session (Enter sends)", id="takeover")
                     with TabPane("review", id="tab-review"):
@@ -192,7 +163,7 @@ class Cockpit(App):
     async def _connect(self) -> None:
         feed = self.query_one("#feed-log", RichLog)
         try:
-            self.ws = await websockets.connect(CONFIG.ws_url)
+            self.ws = await websockets.connect(CONFIG.ws_url, max_size=16 * 1024 * 1024)
         except OSError as e:
             feed.write(f"cannot reach podiumd at {CONFIG.ws_url}: {e}")
             return
@@ -258,18 +229,12 @@ class Cockpit(App):
                     "their tasks re-queued; the daemon restarts in place.",
                     ["Update now", "Not now"]), apply_update)
         elif t == "output":
-            sid = f["session_id"]
-            self._emulator(sid).feed(f["text"])
             if self.selected_session is None:
-                self._select_session(sid)
-            elif sid == self.selected_session:
-                self.query_one("#session-view", TerminalView).refresh()
+                self._select_session(f["session_id"])
         elif t == "snapshot":
             for info in f.get("sessions", []):
                 self.session_info[info["id"]] = info
-            for sid, backlog in f.get("backlogs", {}).items():
-                self._emulator(sid).feed(backlog)
-                self._select_session(sid)
+                self._select_session(info["id"])
         elif t == "work.snapshot":
             self._render_board(f)
         elif t == "task.updated":
@@ -380,12 +345,6 @@ class Cockpit(App):
         await self._send({"type": "run.next"})
         self.query_one("#feed-log", RichLog).write("dispatch requested (run next)")
 
-    def action_page_back(self) -> None:
-        self.query_one("#session-view", TerminalView).page(back=True)
-
-    def action_page_forward(self) -> None:
-        self.query_one("#session-view", TerminalView).page(back=False)
-
     def action_focus_takeover(self) -> None:
         self.query_one("#takeover", Input).focus()
 
@@ -438,7 +397,7 @@ class Cockpit(App):
     async def _rpc(self, frame: dict, reply_type: str | None = None) -> list[dict]:
         """One-shot request on a side connection (the main socket is a live stream)."""
         out = []
-        async with websockets.connect(CONFIG.ws_url) as ws:
+        async with websockets.connect(CONFIG.ws_url, max_size=16 * 1024 * 1024) as ws:
             await ws.recv(); await ws.recv()          # hello + snapshot
             await ws.send(protocol.dumps(frame))
             async with asyncio.timeout(5):
