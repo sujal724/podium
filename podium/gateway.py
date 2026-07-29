@@ -239,25 +239,41 @@ class Daemon:
         return await self.updater.check()
 
     async def on_update_apply(self, f: dict) -> dict:
-        try:
-            await self.updater.apply(f.get("actor", "human"))
-        except UpdateError as e:
-            return protocol.error("update not applied", str(e))
-        return protocol.narration(None, "update applied")
+        # Validate inline, but run the apply DETACHED from this connection's handler:
+        # the restart path waits for client handlers to finish, and the handler that
+        # requested the update can never finish while it's awaiting the apply — the
+        # v0.2.0 self-deadlock found by the first real self-update (spec 002 fix).
+        st = self.updater.status()
+        if not st.get("available"):
+            return protocol.error("update not applied", st.get("reason", ""))
+        if st.get("behind", 0) == 0:
+            return protocol.error("update not applied", "already up to date")
+
+        async def run_apply():
+            try:
+                await self.updater.apply(f.get("actor", "human"))
+            except Exception as e:
+                self.sink.emit(protocol.error("update failed", str(e)))
+
+        self._apply_task = asyncio.create_task(run_apply())
+        return protocol.narration(
+            None, f"applying update to v{st.get('remote_version')} — the daemon "
+                  "restarts itself; clients reconnect")
 
     async def _restart_for_update(self) -> None:
-        """Stop sessions gracefully (their tasks stay `running` → auto-resume
-        re-queues on boot), free the port, re-exec the new code in place."""
+        """Stop sessions (their tasks stay `running` → auto-resume re-queues on
+        boot), free the port, re-exec the new code in place. Every step is bounded —
+        a stuck session or lingering client must never wedge the restart."""
         for sid in list(self.manager.sessions):
-            try:
-                await self.manager.stop(sid)
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.manager.stop(sid), timeout=10)
             self.manager.mark_ended(sid)
         if self._server is not None:
             self._server.close()
-            await self._server.wait_closed()
-        self.state.close()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._server.wait_closed(), timeout=5)
+        with contextlib.suppress(Exception):
+            self.state.close()
         os.execv(sys.executable, [sys.executable, "-m", "podium.gateway"])
 
     async def _update_watch(self) -> None:

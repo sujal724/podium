@@ -99,20 +99,31 @@ class PtySession(Session):
                 return  # PTY closed under us; teardown will follow via reader
 
     async def stop(self) -> None:
-        if self.pid is None:
+        pid = self.pid
+        if pid is None:
             return
-        try:
-            os.kill(self.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        # The child is a session leader (pty.fork), so signal its whole process
+        # group — CLIs spawn subprocesses that must not outlive the session.
+        self._signal(pid, signal.SIGTERM)
         try:
             await asyncio.wait_for(self._exited.wait(), timeout=5)
         except TimeoutError:
+            self._signal(pid, signal.SIGKILL)
             try:
-                os.kill(self.pid, signal.SIGKILL)
-            except (ProcessLookupError, TypeError):
+                await asyncio.wait_for(self._exited.wait(), timeout=5)
+            except TimeoutError:
+                # last resort: the reader never saw EOF; tear down directly
+                self._teardown()
+
+    @staticmethod
+    def _signal(pid: int, sig: int) -> None:
+        try:
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, OSError):
                 pass
-            await self._exited.wait()
 
     def resize(self, rows: int, cols: int) -> None:
         if self._fd is None:
