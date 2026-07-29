@@ -14,12 +14,41 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import (Footer, Header, Input, Label, RichLog, Static,
+from textual.screen import ModalScreen
+from textual.widgets import (Button, Footer, Header, Input, Label, RichLog, Static,
                              TabbedContent, TabPane, Tree)
 
 from podium import protocol
 from podium.config import CONFIG
 from podium.surfaces import blocked_surfaces
+
+
+class QuestionDialog(ModalScreen):
+    """A worker (or Podium itself) is asking the operator something — shown as a real
+    dialog; the chosen option is returned to the app, which relays the answer."""
+
+    CSS = """
+    QuestionDialog { align: center middle; }
+    #qbox { width: 70; max-width: 90%; padding: 1 2; border: thick $primary;
+            background: $surface; }
+    #qbox Button { margin: 1 1 0 0; }
+    """
+
+    def __init__(self, title: str, question: str, choices: list[str]) -> None:
+        super().__init__()
+        self._title = title
+        self._question = question
+        self._choices = choices
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="qbox"):
+            yield Label(f"[b]{self._title}[/b]")
+            yield Static(self._question)
+            for i, label in enumerate(self._choices, start=1):
+                yield Button(f"{i}. {label}", id=f"choice-{i}")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(int(event.button.id.split("-")[1]))
 
 
 class Cockpit(App):
@@ -28,6 +57,7 @@ class Cockpit(App):
     #board { width: 34%; border: solid $primary; }
     #main  { width: 66%; }
     #session-log, #review-log, #feed-log { border: solid $primary; height: 1fr; }
+    #workers { height: 4; border: solid $secondary; }
     #quota { height: 3; border: solid $warning; }
     #takeover { dock: bottom; }
     .blocked { color: $text-muted; padding: 1 2; }
@@ -52,6 +82,7 @@ class Cockpit(App):
             with Vertical(id="board"):
                 yield Label("work board")
                 yield Tree("workspaces", id="board-tree")
+                yield Static("workers: …", id="workers")
                 yield Static("quota: …", id="quota")
             with Vertical(id="main"):
                 with TabbedContent():
@@ -99,7 +130,45 @@ class Cockpit(App):
     def _on_frame(self, f: dict) -> None:
         t = f["type"]
         feed = self.query_one("#feed-log", RichLog)
-        if t == "output":
+        if t == "hello":
+            lines = []
+            for w in f.get("workers", []):
+                mark = "✓" if w["ok"] else f"✗ {w.get('hint', 'unavailable')}"
+                lines.append(f"{w['name']}: {mark}")
+                if not w["ok"]:
+                    feed.write(f"worker {w['name']} unavailable — {w.get('hint', '')}")
+                if w.get("warning"):
+                    feed.write(f"worker {w['name']}: {w['warning']}")
+            self.query_one("#workers", Static).update("\n".join(lines))
+        elif t == "question":
+            q = f["question"]
+            feed.write(f"❓ [{f['session_id']}] {q['q']}")
+
+            def answered(choice: int | None, qid=q["id"], sid=f["session_id"]):
+                if choice is not None:
+                    asyncio.create_task(self._send(
+                        {"type": "answer", "session_id": sid,
+                         "question_id": qid, "value": str(choice)}))
+
+            self.push_screen(
+                QuestionDialog(f"session {f['session_id']}", q["q"],
+                               q.get("choices", [])), answered)
+        elif t == "update.available":
+            feed.write(f"⬆ update available: {f['installed']} → "
+                       f"{f['remote_version']} ({f['behind']} commit(s))")
+
+            def apply_update(choice: int | None):
+                if choice == 1:
+                    asyncio.create_task(self._send({"type": "update.apply"}))
+
+            self.push_screen(
+                QuestionDialog(
+                    "Podium update",
+                    f"Version {f['remote_version']} is on main (you run "
+                    f"{f['installed']}). Apply now? Live sessions are stopped and "
+                    "their tasks re-queued; the daemon restarts in place.",
+                    ["Update now", "Not now"]), apply_update)
+        elif t == "output":
             if self.selected_session in (None, f["session_id"]):
                 self.selected_session = self.selected_session or f["session_id"]
                 self.query_one("#session-log", RichLog).write(
