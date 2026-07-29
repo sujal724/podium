@@ -133,7 +133,15 @@ class Cockpit(App):
         await self._send({"type": "quota.query"})
         await self._send({"type": "task.inbox"})
         async for raw in self.ws:
-            self._on_frame(protocol.loads(raw))
+            try:
+                self._on_frame(protocol.loads(raw))
+            except Exception as e:
+                # One odd frame (or a frame racing mount/teardown) must never
+                # take down the cockpit — the stream continues.
+                try:
+                    feed.write(f"[frame dropped: {type(e).__name__}: {e}]")
+                except Exception:
+                    pass
 
     async def _send(self, frame: dict) -> None:
         if self.ws:

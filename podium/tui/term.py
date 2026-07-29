@@ -7,13 +7,18 @@ screen. `TerminalEmulator` is the pure, testable core (pyte-backed); `TerminalVi
 is its Textual widget.
 """
 
+from functools import lru_cache
+
 import pyte
+from rich.errors import StyleSyntaxError
+from rich.color import ColorParseError
 from rich.style import Style
 from rich.text import Text
 from textual.widget import Widget
 
-# pyte color names → rich colors ("brown" is the ANSI yellow slot); 256/truecolor
-# arrive as bare hex strings.
+# pyte color names → rich colors: "brown" is the ANSI yellow slot, brights are
+# "brightblue"-style in pyte but "bright_blue" in rich; 256/truecolor arrive as
+# bare hex strings.
 _COLOR_FIX = {"brown": "yellow", "default": None}
 
 
@@ -25,7 +30,22 @@ def _rich_color(c: str | None) -> str | None:
         return None
     if len(mapped) == 6 and all(ch in "0123456789abcdef" for ch in mapped):
         return f"#{mapped}"
+    if mapped.startswith("bright") and not mapped.startswith("bright_"):
+        base = mapped[len("bright"):]
+        return f"bright_{'yellow' if base == 'brown' else base}"
     return mapped
+
+
+@lru_cache(maxsize=4096)
+def _style(fg, bg, bold, italics, underscore, reverse) -> Style:
+    """One cached Style per attribute combo — and unparseable colors degrade to
+    unstyled text instead of crashing the app (a PTY can emit anything)."""
+    try:
+        return Style(color=_rich_color(fg), bgcolor=_rich_color(bg), bold=bold,
+                     italic=italics, underline=underscore, reverse=reverse)
+    except (ColorParseError, StyleSyntaxError):
+        return Style(bold=bold, italic=italics, underline=underscore,
+                     reverse=reverse)
 
 
 class TerminalEmulator:
@@ -58,11 +78,8 @@ class TerminalEmulator:
             run, run_style = [], None
             for col in range(self.screen.columns):
                 ch = buf[col]
-                style = Style(
-                    color=_rich_color(ch.fg), bgcolor=_rich_color(ch.bg),
-                    bold=ch.bold, italic=ch.italics, underline=ch.underscore,
-                    reverse=ch.reverse,
-                )
+                style = _style(ch.fg, ch.bg, ch.bold, ch.italics, ch.underscore,
+                               ch.reverse)
                 if style != run_style and run:
                     line.append("".join(run), run_style)
                     run = []
