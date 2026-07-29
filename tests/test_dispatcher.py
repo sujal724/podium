@@ -165,3 +165,31 @@ async def test_run_next_picks_best_ready(rig):
     assert tid == high
     await _await_status(work, high, ("review",))
     await disp.approve(high)
+
+
+async def test_resume_key_only_after_interrupt(rig):
+    """E4: interrupted work continues the same worker conversation; rejected work
+    starts fresh so the operator's feedback reshapes it."""
+    disp, work, proj, repo = rig
+    t = work.create_task(proj, "resume policy", status="ready")
+    disp.state.execute(
+        "INSERT INTO sessions(id,task_id,worker,kind,cwd,status,resume_key,created_at)"
+        " VALUES('s_old',?,'mock','pty','/tmp','exited','claude-uuid-9',1)", (t,))
+    assert disp.resume_key_for(t, "mock") is None          # nothing happened yet
+    work._log(t, "interrupted", "system", {"reason": "update"})
+    assert disp.resume_key_for(t, "mock") == "claude-uuid-9"
+    work._log(t, "review.rejected", "human", {"feedback": "wrong approach"})
+    assert disp.resume_key_for(t, "mock") is None          # rejection ⇒ fresh start
+
+
+async def test_autonomy_resolution_order(rig):
+    """E1: task overrides project overrides daemon default; junk falls back safe."""
+    disp, work, proj, repo = rig
+    t = work.create_task(proj, "modes", status="ready")
+    task = work.get_task(t)
+    assert disp.autonomy_for(task, {"autonomy": None}) == "supervised"
+    assert disp.autonomy_for(task, {"autonomy": "autonomous"}) == "autonomous"
+    work.update_task(t, autonomy="supervised")
+    assert disp.autonomy_for(work.get_task(t), {"autonomy": "autonomous"}) == "supervised"
+    work.update_task(t, autonomy="nonsense")
+    assert disp.autonomy_for(work.get_task(t), {"autonomy": "bogus"}) == "supervised"

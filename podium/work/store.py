@@ -36,6 +36,7 @@ class Task:
     assignee: str | None
     origin: str
     detector: str | None
+    autonomy: str | None = None
     labels: list[str] = field(default_factory=list)
     worktree: str | None = None
 
@@ -45,8 +46,8 @@ class Task:
             id=r["id"], project_id=r["project_id"], parent_id=r["parent_id"],
             title=r["title"], description=r["description"] or "", status=r["status"],
             priority=r["priority"], assignee=r["assignee"], origin=r["origin"],
-            detector=r["detector"], labels=json.loads(r["labels"] or "[]"),
-            worktree=r["worktree"],
+            detector=r["detector"], autonomy=r["autonomy"],
+            labels=json.loads(r["labels"] or "[]"), worktree=r["worktree"],
         )
 
     def to_dict(self) -> dict:
@@ -154,7 +155,7 @@ class WorkStore:
 
     def update_task(self, task_id: str, actor: str = "human", **fields) -> None:
         allowed = {"title", "description", "status", "priority", "assignee", "labels",
-                   "worktree", "parent_id", "project_id"}
+                   "worktree", "parent_id", "project_id", "autonomy"}
         bad = set(fields) - allowed
         if bad:
             raise ValueError(f"cannot update fields: {sorted(bad)}")

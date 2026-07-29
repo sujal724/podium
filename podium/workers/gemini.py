@@ -33,7 +33,8 @@ class GeminiWorker(Worker):
                             hint=hint)
 
     def make_session(self, sid: str, sink: Sink, cwd: str, prompt: str,
-                     kind: str | None = None) -> Session:
+                     kind: str | None = None, resume_key: str | None = None,
+                     autonomy: str = "supervised") -> Session:
         # No settings-level deny surface wired yet: the peer-call deny rides the task
         # preamble (policy.PREAMBLE_DENY, prepended by the dispatcher) — recorded
         # increment, see surfaces.py `peer.deny`.

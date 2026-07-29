@@ -23,9 +23,12 @@ class MockWorker(Worker):
                             headless_ok=True)
 
     def make_session(self, sid: str, sink: Sink, cwd: str, prompt: str,
-                     kind: str | None = None) -> Session:
-        return PtySession(sid, self.name, cwd, sink,
-                          [sys.executable, "-u", str(MOCK_CLI), prompt])
+                     kind: str | None = None, resume_key: str | None = None,
+                     autonomy: str = "supervised") -> Session:
+        argv = [sys.executable, "-u", str(MOCK_CLI), prompt]
+        if resume_key:
+            argv.append(f"--resume={resume_key}")
+        return PtySession(sid, self.name, cwd, sink, argv)
 
 
 if CONFIG.enable_mock:

@@ -27,7 +27,21 @@ def hooks_path(worktree: str) -> Path:
     return Path(worktree) / ".podium" / "hooks.jsonl"
 
 
-def write_claude_settings(worktree: str) -> Path:
+# Autonomy modes for a worker session (the Stage-A slice of the autonomy spectrum,
+# decision 7). The peer-call deny (decision 50) applies in EVERY mode — deny rules
+# take precedence over allow rules, so autonomy never widens into other harnesses.
+AUTONOMY_MODES = {
+    "supervised": "edits auto-accepted; commands ask (Podium surfaces the dialog)",
+    "autonomous": "edits and tools auto-accepted; only denied actions stop it",
+}
+DEFAULT_AUTONOMY = "supervised"
+
+# Tools an autonomous session may use without asking (deny still wins).
+AUTONOMOUS_ALLOW = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch",
+                    "WebSearch", "Task", "TodoWrite", "NotebookEdit"]
+
+
+def write_claude_settings(worktree: str, autonomy: str = DEFAULT_AUTONOMY) -> Path:
     """Generate `.podium/settings.json` for a Claude worker session in `worktree`.
     Returned path is passed to the CLI via `--settings`."""
     pdir = Path(worktree) / ".podium"
@@ -38,6 +52,7 @@ def write_claude_settings(worktree: str) -> Path:
         "permissions": {
             "deny": [f"Bash({b} *)" for b in PEER_BINARIES]
                     + [f"Bash({b})" for b in PEER_BINARIES],
+            "allow": AUTONOMOUS_ALLOW if autonomy == "autonomous" else [],
         },
         "hooks": {
             event: [{"hooks": [{"type": "command", "command": append_cmd}]}]

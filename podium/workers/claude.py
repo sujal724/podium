@@ -40,11 +40,16 @@ class ClaudeWorker(Worker):
                             tos="clean", headless_ok=True, hint=hint, warning=warning)
 
     def make_session(self, sid: str, sink: Sink, cwd: str, prompt: str,
-                     kind: str | None = None) -> Session:
-        settings = policy.write_claude_settings(cwd)
+                     kind: str | None = None, resume_key: str | None = None,
+                     autonomy: str = policy.DEFAULT_AUTONOMY) -> Session:
+        settings = policy.write_claude_settings(cwd, autonomy)
         # Initial prompt rides argv (starts the REPL with it already submitted) —
         # multiline-safe, unlike typing it into the PTY.
         argv = ["claude", "--settings", str(settings), "--permission-mode", "acceptEdits"]
+        if resume_key:
+            # Continue the interrupted conversation instead of starting over:
+            # context, plan, and completed work are all preserved (spec 005).
+            argv += ["--resume", resume_key]
         if prompt:
             argv.append(prompt)
         env = {k: v for k, v in os.environ.items()

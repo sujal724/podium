@@ -97,9 +97,19 @@ class Dispatcher:
             prompt = self._prompt(task)
             self.work.set_status(task_id, "running", data={"worker": worker})
             ws = self.winsize() if self.winsize else None
+            resume_key = self.resume_key_for(task_id, worker)
+            if resume_key:
+                self.sink.emit(protocol.narration(
+                    task_id, f"resuming {worker} session {resume_key[:8]}… "
+                             "(continues where it stopped)"))
+            autonomy = self.autonomy_for(task, proj)
             sess = await self.manager.spawn(worker, prompt, cwd=wt, task_id=task_id,
                                             rows=ws[0] if ws else None,
-                                            cols=ws[1] if ws else None)
+                                            cols=ws[1] if ws else None,
+                                            resume_key=resume_key, autonomy=autonomy)
+            self.sink.emit(protocol.narration(
+                task_id, f"[{sess.id}] {worker} · mode: {autonomy} "
+                         f"({policy.AUTONOMY_MODES.get(autonomy, '')})"))
             scan_q = self.sink.subscribe()
             hook_offset = 0
             try:
@@ -127,6 +137,35 @@ class Dispatcher:
         except Exception as e:
             self.work.set_status(task_id, "blocked", data={"error": str(e)})
             self.sink.emit(protocol.error(f"task {task_id} failed to run", str(e)))
+
+    def autonomy_for(self, task, proj: dict) -> str:
+        """Task overrides project overrides the daemon default (decision 7's
+        spectrum, per-scope). Unknown values fall back to supervised — the safe end."""
+        for candidate in (getattr(task, "autonomy", None), proj.get("autonomy"),
+                          CONFIG.autonomy):
+            if candidate in policy.AUTONOMY_MODES:
+                return candidate
+        return policy.DEFAULT_AUTONOMY
+
+    def resume_key_for(self, task_id: str, worker: str) -> str | None:
+        """The worker session id to continue for this task, if its last session was
+        interrupted (update/restart/crash) rather than finished. A rejected task
+        starts fresh — the operator's feedback should reshape the work, not append
+        to a conversation that already went the wrong way (spec 005)."""
+        rows = self.state.query(
+            "SELECT resume_key FROM sessions WHERE task_id=? AND worker=?"
+            " AND resume_key IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            (task_id, worker))
+        if not rows:
+            return None
+        events = self.state.query(
+            "SELECT type FROM task_events WHERE task_id=? AND type IN"
+            " ('interrupted','review.rejected') ORDER BY id DESC LIMIT 1", (task_id,))
+        # ordered by rowid, not ts: two events in the same second must still
+        # resolve to the later one
+        if events and events[0]["type"] == "interrupted":
+            return rows[0]["resume_key"]
+        return None
 
     def _prompt(self, task) -> str:
         parts = [policy.PREAMBLE_DENY, "", f"Task: {task.title}"]

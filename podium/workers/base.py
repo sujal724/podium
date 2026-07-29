@@ -37,8 +37,12 @@ class Worker(ABC):
 
     @abstractmethod
     def make_session(
-        self, sid: str, sink: Sink, cwd: str, prompt: str, kind: str | None = None
-    ) -> Session: ...
+        self, sid: str, sink: Sink, cwd: str, prompt: str, kind: str | None = None,
+        resume_key: str | None = None, autonomy: str = "supervised",
+    ) -> Session:
+        """`resume_key` continues a previous session of this worker (its own
+        session id) instead of starting fresh — adapters that can't resume ignore
+        it and the caller falls back to a fresh run with feedback."""
 
     @staticmethod
     def _on_path(binary: str) -> bool:

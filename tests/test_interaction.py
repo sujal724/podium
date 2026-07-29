@@ -57,3 +57,40 @@ def test_forget_session_clears_state():
     layer.forget_session("s_5")
     assert q.id not in layer.pending
     assert layer.scan("s_5", "claude", MANGLED_TRUST) is not None  # can re-ask fresh
+
+
+PERMISSION_PROMPT = (
+    "Bash command\n  python -m pytest tests/ -x -q\n\n"
+    "This command requires approval\n\nDo you want to proceed?\n"
+    "\x1b[1m❯ 1. Yes\x1b[0m\n  2. Yes, and don't ask again for: python -m pytest\n"
+    "  3. No\n\nEsc to cancel\n"
+)
+
+
+def test_permission_prompt_offers_the_workers_own_options():
+    """Dogfood: an approval prompt must surface as a dialog with exactly the
+    options the worker offered, and the answer is that option's number."""
+    layer, frames = _layer()
+    q = layer.scan("s_p", "claude", PERMISSION_PROMPT)
+    assert q is not None and q.pattern.id == "claude.permission"
+    assert list(q.choices)[0] == "Yes"
+    assert len(q.choices) == 3
+    assert layer.answer_bytes(q.id, "1") == "1\r"
+    q2 = layer.scan("s_p2", "claude", PERMISSION_PROMPT)
+    assert layer.answer_bytes(q2.id, "No") == "3\r"
+
+
+def test_permission_rearms_for_the_next_prompt():
+    """Each approval is a separate decision: once the prompt leaves the screen the
+    pattern re-arms so the next one asks again."""
+    layer, _ = _layer()
+    assert layer.scan("s_r", "claude", PERMISSION_PROMPT) is not None
+    assert layer.scan("s_r", "claude", PERMISSION_PROMPT) is None      # same prompt
+    layer.scan("s_r", "claude", "working…\n" * 400)                    # prompt scrolls off
+    assert layer.scan("s_r", "claude", PERMISSION_PROMPT) is not None  # next one asks
+
+
+def test_choice_parsing_ignores_noise():
+    from podium.interaction import parse_choices
+    assert parse_choices("1. Yes\n2. No\nrandom 7. text later") == ["Yes", "No"]
+    assert parse_choices("no options here") == []

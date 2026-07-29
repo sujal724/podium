@@ -8,6 +8,7 @@ Connects to podiumd over the wire protocol like any other client.
 """
 
 import asyncio
+import subprocess
 
 import websockets
 from rich.text import Text
@@ -59,16 +60,23 @@ class Cockpit(App):
     #main  { width: 66%; }
     #review-log, #feed-log { border: solid $primary; height: 1fr; }
     #session-scroll { border: solid $primary; height: 1fr; }
+    #session-bar { height: 1; background: $primary-darken-2; color: $text; }
     #workers { height: 4; border: solid $secondary; }
     #quota { height: 3; border: solid $warning; }
     #takeover { dock: bottom; }
     .blocked { color: $text-muted; padding: 1 2; }
     """
     BINDINGS = [
-        Binding("a", "approve", "approve"),
-        Binding("r", "reject", "reject"),
-        Binding("d", "dispatch", "run next"),
-        Binding("q", "quit", "quit"),
+        # Letter bindings would swallow typing, so control actions are ctrl-keyed
+        # and the keyboard belongs to the live session by default.
+        Binding("ctrl+a", "approve", "approve diff"),
+        Binding("ctrl+r", "reject", "reject diff"),
+        Binding("ctrl+d", "dispatch", "run next"),
+        Binding("ctrl+t", "focus_takeover", "takeover"),
+        Binding("ctrl+o", "open_in_claude", "open in claude"),
+        Binding("ctrl+b", "focus_board", "board"),
+        Binding("ctrl+q", "quit", "quit"),
+        Binding("escape", "send_escape", "esc → session"),
     ]
 
     def __init__(self) -> None:
@@ -78,6 +86,23 @@ class Cockpit(App):
         self.selected_task: str | None = None
         self.review_task: str | None = None
         self.emulators: dict[str, TerminalEmulator] = {}
+        self.session_info: dict[str, dict] = {}
+
+    def _update_session_bar(self) -> None:
+        """The operator must always know which session they're watching and what
+        permission mode it runs under — never implicit (dogfood ruling)."""
+        bar = self.query_one("#session-bar", Static)
+        sid = self.selected_session
+        if sid is None:
+            bar.update("no session — ctrl+d dispatches the next ready task")
+            return
+        info = self.session_info.get(sid, {})
+        mode = info.get("autonomy", "supervised")
+        mode_txt = ("AUTONOMOUS · runs tools without asking" if mode == "autonomous"
+                    else "SUPERVISED · asks you before running commands")
+        resumed = " · resumed" if info.get("resumed") else ""
+        bar.update(f" {sid} · {info.get('label', '?')} · {mode_txt}{resumed}"
+                   f" · ctrl+o open in claude · ctrl+t takeover")
 
     def _emulator(self, sid: str) -> TerminalEmulator:
         if sid not in self.emulators:
@@ -88,6 +113,7 @@ class Cockpit(App):
         self.selected_session = sid
         self.query_one("#session-view", TerminalView).attach(self._emulator(sid))
         self._sync_pty_size()
+        self._update_session_bar()
 
     def _viewport(self) -> tuple[int, int] | None:
         """PTY size = the scroll container's viewport (rows) × content width
@@ -130,6 +156,7 @@ class Cockpit(App):
             with Vertical(id="main"):
                 with TabbedContent():
                     with TabPane("session", id="tab-session"):
+                        yield Static("no session", id="session-bar")
                         with VerticalScroll(id="session-scroll"):
                             yield TerminalView(id="session-view")
                         yield Input(placeholder="takeover — text goes to the live "
@@ -150,6 +177,10 @@ class Cockpit(App):
         yield Footer()
 
     async def on_mount(self) -> None:
+        # Focus the takeover input immediately: keys typed at the cockpit must
+        # reach the live session, not the board tree (dogfood: answers to a
+        # worker's approval prompt went nowhere).
+        self.query_one("#takeover", Input).focus()
         self.run_worker(self._connect(), exclusive=True)
 
     async def _connect(self) -> None:
@@ -233,6 +264,8 @@ class Cockpit(App):
                     self.call_after_refresh(
                         lambda: scroll.scroll_end(animate=False))
         elif t == "snapshot":
+            for info in f.get("sessions", []):
+                self.session_info[info["id"]] = info
             for sid, backlog in f.get("backlogs", {}).items():
                 self._emulator(sid).feed(backlog)
                 self._select_session(sid)
@@ -261,8 +294,11 @@ class Cockpit(App):
         elif t == "narration":
             feed.write(f"• {f['text']}")
         elif t == "session.created":
-            self._select_session(f["session"]["id"])
-            feed.write(f"session {f['session']['id']} ({f['session']['label']}) started")
+            info = f["session"]
+            self.session_info[info["id"]] = info
+            self._select_session(info["id"])
+            feed.write(f"session {info['id']} ({info['label']}) started · mode "
+                       f"{info.get('autonomy', 'supervised')}")
         elif t == "session.status":
             feed.write(f"session {f['session_id']}: {f['status']}")
         elif t == "blocked":
@@ -332,6 +368,58 @@ class Cockpit(App):
 
     async def action_dispatch(self) -> None:
         await self._send({"type": "run.next"})
+        self.query_one("#feed-log", RichLog).write("dispatch requested (run next)")
+
+    def action_focus_takeover(self) -> None:
+        self.query_one("#takeover", Input).focus()
+
+    async def action_open_in_claude(self) -> None:
+        """One-key takeover: suspend the cockpit and hand the terminal to the real
+        Claude UI for this session (its own worktree, its own conversation). Exit
+        Claude and you land back in the cockpit — the session keeps running."""
+        sid = self.selected_session
+        feed = self.query_one("#feed-log", RichLog)
+        if sid is None:
+            feed.write("no session selected")
+            return
+        frames = await self._rpc({"type": "sessions.list"})
+        rec = next((s for f in frames if f["type"] == "sessions.snapshot"
+                    for s in f["sessions"] if s["id"] == sid), None)
+        if rec is None:
+            feed.write(f"session {sid} not found on the daemon")
+            return
+        argv = ["claude", "--resume", rec["resume_key"]] if rec.get("resume_key") \
+            else ["claude", "--continue"]
+        cwd = rec.get("cwd")
+        feed.write(f"opening {sid} in claude ({' '.join(argv)})…")
+        with self.suspend():
+            subprocess.run(argv, cwd=cwd)
+        self.refresh()
+
+    async def _rpc(self, frame: dict, reply_type: str | None = None) -> list[dict]:
+        """One-shot request on a side connection (the main socket is a live stream)."""
+        out = []
+        async with websockets.connect(CONFIG.ws_url) as ws:
+            await ws.recv(); await ws.recv()          # hello + snapshot
+            await ws.send(protocol.dumps(frame))
+            async with asyncio.timeout(5):
+                while True:
+                    reply = protocol.loads(await ws.recv())
+                    if reply["type"] in ("output", "task.updated", "narration",
+                                         "session.status"):
+                        continue
+                    out.append(reply)
+                    break
+        return out
+
+    def action_focus_board(self) -> None:
+        self.query_one("#board-tree", Tree).focus()
+
+    async def action_send_escape(self) -> None:
+        """Esc goes to the live session (interrupt), like in the real CLI."""
+        if self.selected_session:
+            await self._send({"type": "agent.send",
+                              "session_id": self.selected_session, "text": "\x1b"})
 
 
 def run() -> None:

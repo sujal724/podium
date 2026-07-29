@@ -24,7 +24,9 @@ class SessionManager:
 
     async def spawn(self, worker: str, prompt: str, cwd: str | None = None,
                     kind: str | None = None, task_id: str | None = None,
-                    rows: int | None = None, cols: int | None = None) -> Session:
+                    rows: int | None = None, cols: int | None = None,
+                    resume_key: str | None = None,
+                    autonomy: str = "supervised") -> Session:
         if worker not in WORKERS:
             raise WorkerUnavailable(f"unknown worker {worker!r}")
         w = WORKERS[worker]()
@@ -32,7 +34,11 @@ class SessionManager:
         if not av.ok:
             raise WorkerUnavailable(av.hint or f"{worker} unavailable")
         sid = new_id("s")
-        sess = w.make_session(sid, self._sink, cwd or CONFIG.workdir, prompt, kind)
+        sess = w.make_session(sid, self._sink, cwd or CONFIG.workdir, prompt, kind,
+                              resume_key=resume_key, autonomy=autonomy)
+        sess.autonomy = autonomy
+        sess.resumed = bool(resume_key)
+        sess.task_id = task_id
         # Spawn at the cockpit's pane size when known: a PTY that starts at the
         # right width never interleaves old- and new-width repaints (spec 003 rev 2).
         if rows and cols and hasattr(sess, "_rows"):
