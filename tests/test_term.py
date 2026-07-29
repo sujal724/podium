@@ -31,6 +31,20 @@ def test_resize_reshapes_grid():
     assert emu.plain_lines()[0] == "x" * 50
 
 
+def test_bright_colors_and_garbage_never_crash():
+    """Regression: pyte reports brights as 'brightblue' (rich wants 'bright_blue');
+    one unknown name must degrade, not take down the app."""
+    from podium.tui.term import _style
+    assert _rich_color("brightblue") == "bright_blue"
+    assert _rich_color("brightbrown") == "bright_yellow"
+    assert str(_style("brightblue", "brightblack", True, False, False, False)) != ""
+    assert _style("not-a-color-at-all", "??", False, False, False, False) is not None
+    # a real bright-color escape renders end to end
+    emu = TerminalEmulator(cols=20, rows=2)
+    emu.feed("\x1b[94mbright blue text\x1b[0m")
+    assert emu.rich_lines()[0].plain.startswith("bright blue text")
+
+
 def test_color_and_attr_mapping():
     emu = TerminalEmulator(cols=20, rows=2)
     emu.feed("\x1b[1;31mred bold\x1b[0m plain")

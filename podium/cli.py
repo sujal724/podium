@@ -5,6 +5,7 @@ everything else is a thin one-shot WS client against the running daemon.
 import argparse
 import asyncio
 import json
+import os
 import sys
 
 import websockets
@@ -142,6 +143,24 @@ def cmd_answer(args) -> None:
                              "value": args.value})))
 
 
+def cmd_open(args) -> None:
+    """Drop into a task's worktree and resume its Claude session in THIS terminal.
+    (Claude lists sessions per directory — Podium's live in each task's worktree,
+    so this takes you there instead of making you hunt for the path.)"""
+    frames = asyncio.run(_rpc({"type": "work.list"}))
+    task = next((t for f in frames if f["type"] == "work.snapshot"
+                 for t in f.get("tasks", []) if t["id"] == args.task_id), None)
+    if task is None:
+        sys.exit(f"no task {args.task_id}")
+    wt = task.get("worktree")
+    if not wt or not os.path.isdir(wt):
+        sys.exit(f"task {args.task_id} has no live worktree "
+                 "(only running/review tasks keep one)")
+    print(f"→ {wt} (claude --continue)")
+    os.chdir(wt)
+    os.execvp("claude", ["claude", "--continue"])
+
+
 def cmd_daemon(args) -> None:
     from podium.gateway import main as daemon_main
     daemon_main()
@@ -226,6 +245,9 @@ def main() -> None:
     s = sub.add_parser("task-run")
     s.add_argument("task_id"); s.add_argument("--worker")
     s.set_defaults(fn=cmd_task_run)
+
+    s = sub.add_parser("open", help="resume a task's claude session in this terminal")
+    s.add_argument("task_id"); s.set_defaults(fn=cmd_open)
 
     s = sub.add_parser("review"); s.add_argument("task_id"); s.set_defaults(fn=cmd_review)
     s = sub.add_parser("approve"); s.add_argument("task_id"); s.set_defaults(fn=cmd_approve)

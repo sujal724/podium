@@ -46,6 +46,21 @@ async def test_stop_terminates(tmp_path):
     assert sess.status in ("exited", "error")
 
 
+async def test_split_utf8_across_reads_not_corrupted(tmp_path):
+    """Regression: a multibyte glyph split across PTY reads must not become
+    replacement-char garbage (the 'glitchy text' from the dogfood run)."""
+    sink = Sink()
+    outputs = []
+    sink.tap(lambda f: outputs.append(f["text"]) if f.get("type") == "output" else None)
+    sess = PtySession(new_id("s"), "mock", str(tmp_path), sink, ["true"])
+    star = "✶".encode()          # 3 bytes
+    sess._decoder  # decoder exists
+    text1 = sess._decoder.decode(star[:2])
+    text2 = sess._decoder.decode(star[2:])
+    assert text1 == "" and text2 == "✶"   # held across reads, decoded whole
+    assert "�" not in text1 + text2
+
+
 async def test_exec_failure_is_error_status(tmp_path):
     sink = Sink()
     sess = PtySession(new_id("s"), "mock", str(tmp_path), sink,
