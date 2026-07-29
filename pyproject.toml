@@ -1,11 +1,12 @@
 [project]
 name = "podium"
-version = "0.2.0"
+version = "0.3.0"
 description = "Orchestrator for AI coding agents — drives official CLIs with native work management, live visibility, quota awareness, and verification."
 requires-python = ">=3.12"
 dependencies = [
     "websockets>=12",
     "textual>=0.80",
+    "pyte>=0.8",
 ]
 
 [project.optional-dependencies]

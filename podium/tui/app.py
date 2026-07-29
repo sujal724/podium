@@ -21,6 +21,7 @@ from textual.widgets import (Button, Footer, Header, Input, Label, RichLog, Stat
 from podium import protocol
 from podium.config import CONFIG
 from podium.surfaces import blocked_surfaces
+from podium.tui.term import TerminalEmulator, TerminalView
 
 
 class QuestionDialog(ModalScreen):
@@ -56,7 +57,7 @@ class Cockpit(App):
     CSS = """
     #board { width: 34%; border: solid $primary; }
     #main  { width: 66%; }
-    #session-log, #review-log, #feed-log { border: solid $primary; height: 1fr; }
+    #review-log, #feed-log { border: solid $primary; height: 1fr; }
     #workers { height: 4; border: solid $secondary; }
     #quota { height: 3; border: solid $warning; }
     #takeover { dock: bottom; }
@@ -75,6 +76,19 @@ class Cockpit(App):
         self.selected_session: str | None = None
         self.selected_task: str | None = None
         self.review_task: str | None = None
+        self.emulators: dict[str, TerminalEmulator] = {}
+
+    def _emulator(self, sid: str) -> TerminalEmulator:
+        if sid not in self.emulators:
+            self.emulators[sid] = TerminalEmulator()
+        return self.emulators[sid]
+
+    def _select_session(self, sid: str) -> None:
+        self.selected_session = sid
+        view = self.query_one("#session-view", TerminalView)
+        view.on_pty_resize = lambda rows, cols: asyncio.create_task(self._send(
+            {"type": "resize", "session_id": sid, "rows": rows, "cols": cols}))
+        view.attach(self._emulator(sid))
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -87,7 +101,7 @@ class Cockpit(App):
             with Vertical(id="main"):
                 with TabbedContent():
                     with TabPane("session", id="tab-session"):
-                        yield RichLog(id="session-log", highlight=False, wrap=False)
+                        yield TerminalView(id="session-view")
                         yield Input(placeholder="takeover — text goes to the live "
                                                 "session (Enter sends)", id="takeover")
                     with TabPane("review", id="tab-review"):
@@ -169,14 +183,16 @@ class Cockpit(App):
                     "their tasks re-queued; the daemon restarts in place.",
                     ["Update now", "Not now"]), apply_update)
         elif t == "output":
-            if self.selected_session in (None, f["session_id"]):
-                self.selected_session = self.selected_session or f["session_id"]
-                self.query_one("#session-log", RichLog).write(
-                    Text.from_ansi(f["text"]), scroll_end=True)
+            sid = f["session_id"]
+            self._emulator(sid).feed(f["text"])
+            if self.selected_session is None:
+                self._select_session(sid)
+            elif sid == self.selected_session:
+                self.query_one("#session-view", TerminalView).refresh()
         elif t == "snapshot":
             for sid, backlog in f.get("backlogs", {}).items():
-                self.selected_session = sid
-                self.query_one("#session-log", RichLog).write(Text.from_ansi(backlog))
+                self._emulator(sid).feed(backlog)
+                self._select_session(sid)
         elif t == "work.snapshot":
             self._render_board(f)
         elif t == "task.updated":
@@ -202,8 +218,7 @@ class Cockpit(App):
         elif t == "narration":
             feed.write(f"• {f['text']}")
         elif t == "session.created":
-            self.selected_session = f["session"]["id"]
-            self.query_one("#session-log", RichLog).clear()
+            self._select_session(f["session"]["id"])
             feed.write(f"session {f['session']['id']} ({f['session']['label']}) started")
         elif t == "session.status":
             feed.write(f"session {f['session_id']}: {f['status']}")
