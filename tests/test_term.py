@@ -45,6 +45,19 @@ def test_bright_colors_and_garbage_never_crash():
     assert emu.rich_lines()[0].plain.startswith("bright blue text")
 
 
+def test_scrollback_preserved_beyond_screen():
+    """C5: transcript that scrolls off the live grid stays available."""
+    emu = TerminalEmulator(cols=40, rows=10)
+    for i in range(1, 51):
+        emu.feed(f"line number {i}\r\n")
+    full = emu.plain_full()
+    text = "\n".join(full)
+    assert "line number 1" in text and "line number 50" in text
+    assert len(full) > 10                      # more than one screen retained
+    visible = "\n".join(emu.plain_lines())
+    assert "line number 1" not in visible      # ...but off the live screen
+
+
 def test_color_and_attr_mapping():
     emu = TerminalEmulator(cols=20, rows=2)
     emu.feed("\x1b[1;31mred bold\x1b[0m plain")

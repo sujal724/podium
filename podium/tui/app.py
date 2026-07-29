@@ -13,7 +13,7 @@ import websockets
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (Button, Footer, Header, Input, Label, RichLog, Static,
                              TabbedContent, TabPane, Tree)
@@ -58,6 +58,7 @@ class Cockpit(App):
     #board { width: 34%; border: solid $primary; }
     #main  { width: 66%; }
     #review-log, #feed-log { border: solid $primary; height: 1fr; }
+    #session-scroll { border: solid $primary; height: 1fr; }
     #workers { height: 4; border: solid $secondary; }
     #quota { height: 3; border: solid $warning; }
     #takeover { dock: bottom; }
@@ -85,10 +86,38 @@ class Cockpit(App):
 
     def _select_session(self, sid: str) -> None:
         self.selected_session = sid
-        view = self.query_one("#session-view", TerminalView)
-        view.on_pty_resize = lambda rows, cols: asyncio.create_task(self._send(
-            {"type": "resize", "session_id": sid, "rows": rows, "cols": cols}))
-        view.attach(self._emulator(sid))
+        self.query_one("#session-view", TerminalView).attach(self._emulator(sid))
+        self._sync_pty_size()
+
+    def _viewport(self) -> tuple[int, int] | None:
+        """PTY size = the scroll container's viewport (rows) × content width
+        (cols, minus scrollbar); the view itself is content-tall."""
+        try:
+            scroll = self.query_one("#session-scroll", VerticalScroll)
+        except Exception:
+            return None
+        area = scroll.content_size
+        if area.height <= 2 or area.width <= 10:
+            return None
+        return area.height, max(10, area.width - 1)
+
+    def _sync_pty_size(self) -> None:
+        vp = self._viewport()
+        if vp is None:
+            return
+        rows, cols = vp
+        sid = self.selected_session
+        if sid is not None:
+            self._emulator(sid).resize(rows, cols)
+            asyncio.create_task(self._send(
+                {"type": "resize", "session_id": sid, "rows": rows, "cols": cols}))
+        # daemon remembers the pane size and spawns future PTYs to match, so
+        # sessions never start at a mismatched width (the interleave glitch)
+        asyncio.create_task(self._send(
+            {"type": "winsize", "rows": rows, "cols": cols}))
+
+    def on_resize(self, event) -> None:
+        self._sync_pty_size()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -101,7 +130,8 @@ class Cockpit(App):
             with Vertical(id="main"):
                 with TabbedContent():
                     with TabPane("session", id="tab-session"):
-                        yield TerminalView(id="session-view")
+                        with VerticalScroll(id="session-scroll"):
+                            yield TerminalView(id="session-view")
                         yield Input(placeholder="takeover — text goes to the live "
                                                 "session (Enter sends)", id="takeover")
                     with TabPane("review", id="tab-review"):
@@ -196,7 +226,12 @@ class Cockpit(App):
             if self.selected_session is None:
                 self._select_session(sid)
             elif sid == self.selected_session:
-                self.query_one("#session-view", TerminalView).refresh()
+                scroll = self.query_one("#session-scroll", VerticalScroll)
+                at_bottom = scroll.scroll_offset.y >= scroll.max_scroll_y - 1
+                self.query_one("#session-view", TerminalView).refresh(layout=True)
+                if at_bottom:  # follow the stream unless the operator scrolled up
+                    self.call_after_refresh(
+                        lambda: scroll.scroll_end(animate=False))
         elif t == "snapshot":
             for sid, backlog in f.get("backlogs", {}).items():
                 self._emulator(sid).feed(backlog)
@@ -252,16 +287,23 @@ class Cockpit(App):
         tree.root.expand()
 
     def _render_quota(self, f: dict) -> None:
+        # "unavailable" here means the READ SURFACE isn't wired (ADR-0005), not
+        # that the worker is down — render it as a dash, never as scary text.
         gauge = self.query_one("#quota", Static)
         if f["type"] == "quota.snapshot":
-            parts = []
+            parts, any_unread = [], False
             for worker, st in f["workers"].items():
-                mark = "LIMITED" if st.get("limited") else st.get("window_5h")
-                parts.append(f"{worker}: {mark}")
-            gauge.update("quota  " + "  ".join(parts))
-        else:
-            gauge.update(f"quota  {f['worker']}: "
-                         + ("LIMITED" if f.get("limited") else "updated"))
+                if st.get("limited"):
+                    mark = "LIMITED"
+                elif st.get("window_5h") == "unavailable":
+                    mark, any_unread = "–", True
+                else:
+                    mark = str(st.get("window_5h"))
+                parts.append(f"{worker} {mark}")
+            note = "  (– = usage reader pending, ADR-0005)" if any_unread else ""
+            gauge.update("quota  " + "  ".join(parts) + note)
+        elif f.get("limited"):
+            gauge.update(f"quota  {f['worker']}: LIMITED (backoff)")
 
     # --- actions ------------------------------------------------------------
 

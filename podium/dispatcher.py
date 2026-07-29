@@ -13,6 +13,7 @@ over the DAG is a Stage C surface.
 import asyncio
 
 from podium import policy, protocol
+from podium.config import CONFIG
 from podium.manager import SessionManager
 from podium.metering import Meter
 from podium.sink import Sink
@@ -39,6 +40,8 @@ class Dispatcher:
         self.state = state
         self.default_worker = default_worker
         self.running: dict[str, asyncio.Task] = {}   # task_id → runner
+        self._linked: set[str] = set()               # sessions with resume_key stored
+        self.winsize = None                          # () -> (rows, cols) | None
 
     # --- dispatch -----------------------------------------------------------
 
@@ -93,13 +96,17 @@ class Dispatcher:
             self.work.update_task(task_id, actor="system", worktree=wt)
             prompt = self._prompt(task)
             self.work.set_status(task_id, "running", data={"worker": worker})
-            sess = await self.manager.spawn(worker, prompt, cwd=wt, task_id=task_id)
+            ws = self.winsize() if self.winsize else None
+            sess = await self.manager.spawn(worker, prompt, cwd=wt, task_id=task_id,
+                                            rows=ws[0] if ws else None,
+                                            cols=ws[1] if ws else None)
             scan_q = self.sink.subscribe()
             hook_offset = 0
             try:
                 waiter = asyncio.create_task(sess.wait())
                 while not waiter.done():
-                    hook_offset = self._ingest_hooks(wt, sess.id, hook_offset)
+                    hook_offset = self._ingest_hooks(wt, sess.id, hook_offset,
+                                                     repo_root=proj["repo_root"])
                     try:
                         frame = await asyncio.wait_for(scan_q.get(), timeout=HOOK_POLL_S)
                     except TimeoutError:
@@ -110,7 +117,8 @@ class Dispatcher:
                 exit_code = waiter.result()
             finally:
                 self.sink.unsubscribe(scan_q)
-                self._ingest_hooks(wt, sess.id, hook_offset)
+                self._ingest_hooks(wt, sess.id, hook_offset,
+                                   repo_root=proj["repo_root"])
             self.manager.mark_ended(sess.id)
             self.meter.record_session(sess.id, task_id, worker, sess.kind,
                                       started, now(),
@@ -132,7 +140,8 @@ class Dispatcher:
                       "then exit."]
         return "\n".join(parts)
 
-    def _ingest_hooks(self, worktree: str, session_id: str, offset: int) -> int:
+    def _ingest_hooks(self, worktree: str, session_id: str, offset: int,
+                      repo_root: str | None = None) -> int:
         events, new_offset = policy.read_hook_events(worktree, offset)
         for ev in events:
             self.state.log_event(session_id, "hook", ev)
@@ -140,7 +149,40 @@ class Dispatcher:
             tool = ev.get("tool_name", "")
             self.sink.emit(protocol.narration(
                 None, f"[{session_id}] {name}{f' {tool}' if tool else ''}"))
+            claude_sid = ev.get("session_id")
+            if claude_sid and session_id not in self._linked:
+                self._link_claude_session(session_id, claude_sid, worktree, repo_root)
         return new_offset
+
+    def _link_claude_session(self, session_id: str, claude_sid: str,
+                             worktree: str, repo_root: str | None) -> None:
+        """Spec 004: record the worker CLI's own session id (resume from anywhere
+        with `claude --resume <id>`) and mirror the transcript into the parent
+        repo's claude project dir so it lists in the operator's usual picker."""
+        self._linked.add(session_id)
+        self.state.execute("UPDATE sessions SET resume_key=? WHERE id=?",
+                           (claude_sid, session_id))
+        self.sink.emit(protocol.narration(
+            None, f"[{session_id}] claude session {claude_sid[:8]}… "
+                  f"(claude --resume {claude_sid})"))
+        if repo_root and CONFIG.session_mirror:
+            try:
+                policy.mirror_session(worktree, repo_root, claude_sid)
+            except OSError as e:
+                self.state.log_event(session_id, "mirror.failed", {"error": str(e)})
+
+    async def interrupt_all(self, reason: str = "shutdown") -> list[str]:
+        """Cancel every in-flight runner WITHOUT running its finish path, so the
+        tasks stay `running` and boot auto-resume re-queues them (spec 004 Part 1 —
+        an update/shutdown interrupt is a crash, not a completion)."""
+        interrupted = []
+        for task_id, runner in list(self.running.items()):
+            runner.cancel()
+            self.work._log(task_id, "interrupted", "system", {"reason": reason})
+            interrupted.append(task_id)
+        if self.running:
+            await asyncio.gather(*self.running.values(), return_exceptions=True)
+        return interrupted
 
     async def _finish(self, task_id: str, proj: dict, exit_code: int) -> None:
         # `verifying` exists now; the verifier arrives in Stage C and will gate here.

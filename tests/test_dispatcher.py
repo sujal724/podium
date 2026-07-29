@@ -3,6 +3,7 @@ claim → worktree → PTY run → commit → review(diff) → approve merges / 
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -81,6 +82,69 @@ async def test_unclaimable_task_raises(rig):
     t = work.create_task(proj, "still backlog")  # not triaged
     with pytest.raises(DispatchError):
         await disp.run_task(t)
+
+
+async def test_interrupt_all_requeues_instead_of_blocking(rig):
+    """D1 (spec 004): an update/shutdown interrupt must not run the finish path —
+    the task stays `running` and boot auto-resume re-queues it (the v0.3.2 dogfood
+    flaw: it went `blocked` with 'no commits')."""
+    disp, work, proj, repo = rig
+    t = work.create_task(proj, "[[ask]] [[nocommit]] long running", status="ready")
+    await disp.run_task(t)
+    async with asyncio.timeout(15):
+        while not disp.manager.sessions:
+            await asyncio.sleep(0.05)
+    await _await_status(work, t, ("running",))
+    interrupted = await disp.interrupt_all("update")
+    assert interrupted == [t]
+    for sid in list(disp.manager.sessions):
+        await disp.manager.stop(sid)
+    await asyncio.sleep(0.2)  # any stray finish-path would land here
+    assert work.get_task(t).status == "running"      # interrupted, NOT blocked
+    assert disp.resume_interrupted() == [t]
+    assert work.get_task(t).status == "ready"
+
+
+async def test_hook_capture_stores_resume_key(rig, tmp_path):
+    """D2: the claude session id arriving via hook events lands in
+    sessions.resume_key."""
+    disp, work, proj, repo = rig
+    t = work.create_task(proj, "[[ask]] [[nocommit]] capture", status="ready")
+    await disp.run_task(t)
+    async with asyncio.timeout(15):
+        while not disp.manager.sessions:
+            await asyncio.sleep(0.05)
+    sid = next(iter(disp.manager.sessions))
+    wt = work.get_task(t).worktree
+    (Path(wt) / ".podium").mkdir(exist_ok=True)
+    (Path(wt) / ".podium" / "hooks.jsonl").write_text(
+        '{"hook_event_name": "PreToolUse", "session_id": "abcd-1234"}\n')
+    async with asyncio.timeout(10):
+        while True:
+            rows = disp.state.query("SELECT resume_key FROM sessions WHERE id=?",
+                                    (sid,))
+            if rows and rows[0]["resume_key"] == "abcd-1234":
+                break
+            await asyncio.sleep(0.1)
+    await disp.interrupt_all()
+    for s in list(disp.manager.sessions):
+        await disp.manager.stop(s)
+
+
+async def test_spawn_uses_cockpit_winsize(rig):
+    """C6 (spec 003 rev 2): new PTYs spawn at the cockpit's pane size, so the CLI
+    never paints for a width the pane doesn't have."""
+    disp, work, proj, repo = rig
+    disp.winsize = lambda: (33, 155)
+    t = work.create_task(proj, "[[ask]] [[nocommit]] sized", status="ready")
+    await disp.run_task(t)
+    async with asyncio.timeout(15):
+        while not disp.manager.sessions:
+            await asyncio.sleep(0.05)
+    sess = next(iter(disp.manager.sessions.values()))
+    assert (sess._rows, sess._cols) == (33, 155)
+    await disp.interrupt_all()
+    await disp.manager.stop(sess.id)
 
 
 async def test_resume_interrupted(rig):

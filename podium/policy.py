@@ -49,6 +49,34 @@ def write_claude_settings(worktree: str) -> Path:
     return path
 
 
+def munge_project_path(path: str) -> str:
+    """Claude Code keys ~/.claude/projects/ dirs by the cwd with every
+    non-alphanumeric replaced by '-' (observed layout, e.g.
+    /home/x/.podium/work → -home-x--podium-work)."""
+    import re
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def mirror_session(worktree: str, repo_root: str, claude_session_id: str,
+                   projects_base: Path | None = None) -> Path | None:
+    """Spec 004: make a Podium worktree session visible in the parent repo's
+    `claude --resume` picker by symlinking its transcript into the repo's project
+    dir. Returns the link path, or None if the source transcript doesn't exist
+    (yet). Resuming from the repo runs with repo cwd — mid-task takeover should go
+    through `podium open`, which resumes inside the worktree."""
+    base = projects_base or (Path("~/.claude/projects").expanduser())
+    src = base / munge_project_path(str(Path(worktree).resolve())) \
+        / f"{claude_session_id}.jsonl"
+    if not src.exists():
+        return None
+    dest_dir = base / munge_project_path(str(Path(repo_root).resolve()))
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src.name
+    if not dest.exists():
+        dest.symlink_to(src)
+    return dest
+
+
 def read_hook_events(worktree: str, offset: int = 0) -> tuple[list[dict], int]:
     """Read hook lifecycle events appended since `offset` bytes. Returns (events,
     new_offset). Malformed lines are skipped (hooks are best-effort telemetry)."""

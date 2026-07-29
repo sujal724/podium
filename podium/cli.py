@@ -143,10 +143,22 @@ def cmd_answer(args) -> None:
                              "value": args.value})))
 
 
+def cmd_sessions(args) -> None:
+    frames = asyncio.run(_rpc({"type": "sessions.list"}))
+    for f in frames:
+        if f["type"] != "sessions.snapshot":
+            continue
+        for s in f["sessions"]:
+            line = (f"{s['id']}  [{s['status']:>11}]  {s['worker']:<7} "
+                    f"{s.get('title') or s.get('task_id') or '(direct spawn)'}")
+            if s.get("resume_key"):
+                line += f"\n{'':14}claude --resume {s['resume_key']}"
+            print(line)
+
+
 def cmd_open(args) -> None:
-    """Drop into a task's worktree and resume its Claude session in THIS terminal.
-    (Claude lists sessions per directory — Podium's live in each task's worktree,
-    so this takes you there instead of making you hunt for the path.)"""
+    """Drop into a task's worktree and resume its exact Claude session in THIS
+    terminal (falls back to --continue when the session id isn't captured yet)."""
     frames = asyncio.run(_rpc({"type": "work.list"}))
     task = next((t for f in frames if f["type"] == "work.snapshot"
                  for t in f.get("tasks", []) if t["id"] == args.task_id), None)
@@ -156,9 +168,14 @@ def cmd_open(args) -> None:
     if not wt or not os.path.isdir(wt):
         sys.exit(f"task {args.task_id} has no live worktree "
                  "(only running/review tasks keep one)")
-    print(f"→ {wt} (claude --continue)")
+    sframes = asyncio.run(_rpc({"type": "sessions.list"}))
+    key = next((s["resume_key"] for f in sframes if f["type"] == "sessions.snapshot"
+                for s in f["sessions"]
+                if s.get("task_id") == args.task_id and s.get("resume_key")), None)
+    argv = ["claude", "--resume", key] if key else ["claude", "--continue"]
+    print(f"→ {wt} ({' '.join(argv)})")
     os.chdir(wt)
-    os.execvp("claude", ["claude", "--continue"])
+    os.execvp("claude", argv)
 
 
 def cmd_daemon(args) -> None:
@@ -248,6 +265,9 @@ def main() -> None:
 
     s = sub.add_parser("open", help="resume a task's claude session in this terminal")
     s.add_argument("task_id"); s.set_defaults(fn=cmd_open)
+
+    sub.add_parser("sessions", help="list sessions with claude resume commands"
+                   ).set_defaults(fn=cmd_sessions)
 
     s = sub.add_parser("review"); s.add_argument("task_id"); s.set_defaults(fn=cmd_review)
     s = sub.add_parser("approve"); s.add_argument("task_id"); s.set_defaults(fn=cmd_approve)

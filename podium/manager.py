@@ -23,7 +23,8 @@ class SessionManager:
         return out
 
     async def spawn(self, worker: str, prompt: str, cwd: str | None = None,
-                    kind: str | None = None, task_id: str | None = None) -> Session:
+                    kind: str | None = None, task_id: str | None = None,
+                    rows: int | None = None, cols: int | None = None) -> Session:
         if worker not in WORKERS:
             raise WorkerUnavailable(f"unknown worker {worker!r}")
         w = WORKERS[worker]()
@@ -32,6 +33,10 @@ class SessionManager:
             raise WorkerUnavailable(av.hint or f"{worker} unavailable")
         sid = new_id("s")
         sess = w.make_session(sid, self._sink, cwd or CONFIG.workdir, prompt, kind)
+        # Spawn at the cockpit's pane size when known: a PTY that starts at the
+        # right width never interleaves old- and new-width repaints (spec 003 rev 2).
+        if rows and cols and hasattr(sess, "_rows"):
+            sess._rows, sess._cols = rows, cols
         self.sessions[sid] = sess
         self._state.execute(
             "INSERT INTO sessions(id,task_id,worker,kind,cwd,status,created_at)"
