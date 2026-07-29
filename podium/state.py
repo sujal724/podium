@@ -8,6 +8,7 @@ and cycle checks are relational queries (WORKFLOW §2.1).
 """
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -81,6 +82,21 @@ CREATE TABLE IF NOT EXISTS quota_ledger(id INTEGER PRIMARY KEY, worker TEXT, win
 """
 
 
+def cols_add(cols: dict[str, str], raw: str) -> None:
+    """Parse one column definition; skip table constraints (PRIMARY KEY(...) etc.)."""
+    text = " ".join(line.split("--")[0] for line in raw.splitlines()).strip()
+    if not text:
+        return
+    parts = text.split()
+    name = parts[0]
+    if name.upper() in ("PRIMARY", "UNIQUE", "FOREIGN", "CHECK", "CONSTRAINT"):
+        return
+    decl = " ".join(parts[1:]) or "TEXT"
+    if "PRIMARY KEY" in decl.upper() or "UNIQUE" in decl.upper():
+        decl = decl.split()[0]           # ALTER TABLE cannot add PK/UNIQUE columns
+    cols[name] = decl
+
+
 def now() -> int:
     return int(time.time())
 
@@ -100,7 +116,47 @@ class StateStore:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA foreign_keys=ON")
             self._db.executescript(SCHEMA)
+            self._migrate()
             self._db.commit()
+
+    def _migrate(self) -> None:
+        """`CREATE TABLE IF NOT EXISTS` never alters an EXISTING table, so a column
+        added in a later version would be missing from an older database (found in
+        dogfooding: v0.4.0's tasks.base_ref broke a live board). Add any column the
+        schema declares that the table lacks — additive only, never destructive."""
+        for table, ddl in self._declared_columns().items():
+            have = {r["name"] for r in
+                    self._db.execute(f"PRAGMA table_info({table})").fetchall()}
+            if not have:
+                continue
+            for name, decl in ddl.items():
+                if name not in have:
+                    self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+    @staticmethod
+    def _declared_columns() -> dict[str, dict[str, str]]:
+        out: dict[str, dict[str, str]] = {}
+        for match in re.finditer(
+                r"CREATE TABLE IF NOT EXISTS (\w+)\((.*?)\);", SCHEMA, re.S):
+            table, body = match.group(1), match.group(2)
+            # strip comments BEFORE splitting: a comma inside a `-- comment` would
+            # otherwise split one column definition into two
+            body = "\n".join(line.split("--")[0] for line in body.splitlines())
+            cols: dict[str, str] = {}
+            depth = 0
+            current = ""
+            for ch in body:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                if ch == "," and depth == 0:
+                    cols_add(cols, current); current = ""
+                else:
+                    current += ch
+            cols_add(cols, current)
+            out[table] = cols
+        return out
 
     def execute(self, sql: str, params: tuple | dict = ()) -> sqlite3.Cursor:
         with self._lock:
