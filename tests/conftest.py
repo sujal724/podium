@@ -2,8 +2,10 @@ import os
 import subprocess
 
 # Must be set before any podium import: registers the mock worker and keeps
-# config defaults pointing at test-friendly paths.
+# config defaults pointing at test-friendly paths. The periodic update watch is off
+# so tests never touch the network.
 os.environ["PODIUM_ENABLE_MOCK"] = "1"
+os.environ["PODIUM_UPDATE_CHECK_S"] = "0"
 
 import pytest
 

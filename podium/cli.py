@@ -107,6 +107,41 @@ def cmd_quota(args) -> None:
     _print(asyncio.run(_rpc({"type": "quota.query"})))
 
 
+def cmd_workers(args) -> None:
+    async def get():
+        async with websockets.connect(CONFIG.ws_url) as ws:
+            return protocol.loads(await ws.recv())  # hello carries posture
+    hello = asyncio.run(get())
+    for w in hello["workers"]:
+        mark = "✓ available" if w["ok"] else f"✗ {w.get('hint', 'unavailable')}"
+        extra = f"  [{w['auth']}, tos={w['tos']}]"
+        warn = f"\n    ⚠ {w['warning']}" if w.get("warning") else ""
+        print(f"{w['name']:<12} {mark}{extra}{warn}")
+
+
+def cmd_update(args) -> None:
+    frames = asyncio.run(_rpc({"type": "update.apply" if args.apply
+                               else "update.check"}))
+    for f in frames:
+        if f["type"] == "update.status":
+            if not f.get("available"):
+                print(f"self-update unavailable: {f.get('reason')}")
+            elif f.get("behind", 0) == 0:
+                print(f"up to date (v{f['installed']}, {f.get('head')})")
+            else:
+                print(f"update available: v{f['installed']} → "
+                      f"v{f.get('remote_version')} ({f['behind']} commit(s) behind)\n"
+                      f"apply with: podium update --apply")
+        else:
+            _print([f])
+
+
+def cmd_answer(args) -> None:
+    _print(asyncio.run(_rpc({"type": "answer", "session_id": args.session_id,
+                             "question_id": args.question_id or "",
+                             "value": args.value})))
+
+
 def cmd_daemon(args) -> None:
     from podium.gateway import main as daemon_main
     daemon_main()
@@ -199,6 +234,17 @@ def main() -> None:
     s.set_defaults(fn=cmd_reject)
 
     sub.add_parser("quota").set_defaults(fn=cmd_quota)
+    sub.add_parser("workers", help="worker availability + posture").set_defaults(
+        fn=cmd_workers)
+
+    s = sub.add_parser("update", help="check for / apply a Podium update")
+    s.add_argument("--apply", action="store_true")
+    s.set_defaults(fn=cmd_update)
+
+    s = sub.add_parser("answer", help="answer a worker question")
+    s.add_argument("session_id"); s.add_argument("value")
+    s.add_argument("--question-id", dest="question_id")
+    s.set_defaults(fn=cmd_answer)
 
     s = sub.add_parser("send", help="send a raw wire frame")
     s.add_argument("frame_type"); s.add_argument("--json")

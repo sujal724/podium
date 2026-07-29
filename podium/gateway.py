@@ -10,6 +10,8 @@ persisted to `events`; session output goes to per-session transcript files.
 import asyncio
 import contextlib
 import logging
+import os
+import sys
 from pathlib import Path
 
 import websockets
@@ -18,11 +20,13 @@ import podium
 from podium import protocol
 from podium.config import CONFIG
 from podium.dispatcher import Dispatcher
+from podium.interaction import InteractionLayer
 from podium.manager import SessionManager
 from podium.metering import Meter
 from podium.sink import Sink
 from podium.state import StateStore
 from podium.surfaces import SURFACES, frame_surface
+from podium.update import SelfUpdater, UpdateError
 from podium.work.store import WorkStore
 
 log = logging.getLogger("podiumd")
@@ -40,9 +44,13 @@ class Daemon:
         self.dispatcher = Dispatcher(self.work, self.manager, self.workspaces,
                                      self.meter, self.sink, self.state,
                                      CONFIG.default_worker)
+        self.interaction = InteractionLayer(self.sink)
+        self.updater = SelfUpdater(self.sink, restart_fn=self._restart_for_update)
+        self._server = None
         self.transcripts = Path(workdir or CONFIG.workdir).expanduser() / "transcripts"
         self.transcripts.mkdir(parents=True, exist_ok=True)
         self.sink.tap(self._persist)
+        self.sink.tap(self._scan_prompts)
 
     def _persist(self, frame: dict) -> None:
         if frame.get("type") == "output":
@@ -53,6 +61,15 @@ class Daemon:
             self.state.log_event(frame.get("session_id"), frame["type"],
                                  {k: v for k, v in frame.items()
                                   if k not in ("type", "session_id")})
+
+    def _scan_prompts(self, frame: dict) -> None:
+        """Worker CLIs' own dialogs (trust, login) become uniform questions the
+        operator answers from the cockpit — Podium relays, never decides (spec 002)."""
+        if frame.get("type") != "output":
+            return
+        sess = self.manager.sessions.get(frame["session_id"])
+        if sess is not None:
+            self.interaction.scan(sess.id, sess.label, frame["text"])
 
     def boot(self) -> None:
         if CONFIG.autoresume:
@@ -114,8 +131,10 @@ class Daemon:
         await self.manager.write(f["session_id"], f["text"])
 
     async def on_answer(self, f: dict) -> None:
-        # Native approval routing is a Stage B surface; PTY answer = write + newline.
-        await self.manager.write(f["session_id"], str(f["value"]) + "\r")
+        # Known prompts translate to the exact keystrokes the worker's dialog expects;
+        # anything else is a generic line answer. Native callbacks are Stage B.
+        data = self.interaction.answer_bytes(f.get("question_id", ""), f["value"])
+        await self.manager.write(f["session_id"], data)
 
     async def on_stop(self, f: dict) -> None:
         await self.manager.stop(f["session_id"])
@@ -212,6 +231,43 @@ class Daemon:
         diff = self.workspaces.diff(proj["repo_root"], task.id, proj["base_branch"])
         return protocol.review_ready(task.id, diff, self.workspaces.branch(task.id))
 
+    # self-update (spec 002): watch → tell → operator-approved apply
+    async def on_update_status(self, f: dict) -> dict:
+        return self.updater.status()
+
+    async def on_update_check(self, f: dict) -> dict:
+        return await self.updater.check()
+
+    async def on_update_apply(self, f: dict) -> dict:
+        try:
+            await self.updater.apply(f.get("actor", "human"))
+        except UpdateError as e:
+            return protocol.error("update not applied", str(e))
+        return protocol.narration(None, "update applied")
+
+    async def _restart_for_update(self) -> None:
+        """Stop sessions gracefully (their tasks stay `running` → auto-resume
+        re-queues on boot), free the port, re-exec the new code in place."""
+        for sid in list(self.manager.sessions):
+            try:
+                await self.manager.stop(sid)
+            except Exception:
+                pass
+            self.manager.mark_ended(sid)
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+        self.state.close()
+        os.execv(sys.executable, [sys.executable, "-m", "podium.gateway"])
+
+    async def _update_watch(self) -> None:
+        while True:
+            await asyncio.sleep(CONFIG.update_check_s)
+            try:
+                await self.updater.check()
+            except Exception as e:
+                log.warning("update check failed: %s", e)
+
     # quota + surfaces
     async def on_quota_query(self, f: dict) -> dict:
         return {"type": "quota.snapshot",
@@ -227,11 +283,14 @@ class Daemon:
 
     async def serve(self, host: str | None = None, port: int | None = None):
         self.boot()
-        return await websockets.serve(
+        self._server = await websockets.serve(
             self.handle_client,
             host if host is not None else CONFIG.host,
             port if port is not None else CONFIG.port,
             max_size=16 * 1024 * 1024)
+        if CONFIG.update_check_s > 0 and self.updater.repo is not None:
+            self._watch_task = asyncio.create_task(self._update_watch())
+        return self._server
 
 
 async def _amain() -> None:

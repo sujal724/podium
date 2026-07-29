@@ -2,6 +2,8 @@
 echoes activity, makes a commit in its cwd, and behaves per embedded directives:
 
   [[echo:TEXT]]     — print TEXT (takeover round-trip proof)
+  [[trust]]         — render a Claude-style trust dialog (ANSI-interleaved) and wait;
+                      "1" continues (prints TRUSTED), anything else exits 2
   [[ratelimit]]     — print a rate-limit line and exit 1 (backoff proof)
   [[fail]]          — exit 1 without committing
   [[nocommit]]      — exit 0 without committing
@@ -21,6 +23,16 @@ def main() -> int:
     prompt = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.readline().strip()
     print(f"prompt received: {prompt.splitlines()[0] if prompt else ''}")
 
+    if "[[trust]]" in prompt:
+        # mimic the real dialog's escape-interleaved rendering
+        print("Quick safety check: is this a project you trust?")
+        print("\x1b[1m❯ 1. Yes, I \x1b[0mt\x1b[1mrust this folder\x1b[0m")
+        print("  2. No, exit")
+        answer = sys.stdin.readline().strip()
+        if answer != "1":
+            print("exiting: not trusted")
+            return 2
+        print("TRUSTED")
     if "[[echo:" in prompt:
         text = prompt.split("[[echo:", 1)[1].split("]]", 1)[0]
         print(f"ECHO:{text}")
