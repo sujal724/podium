@@ -94,3 +94,21 @@ def test_choice_parsing_ignores_noise():
     from podium.interaction import parse_choices
     assert parse_choices("1. Yes\n2. No\nrandom 7. text later") == ["Yes", "No"]
     assert parse_choices("no options here") == []
+
+
+def test_detect_mode_from_status_line():
+    from podium.interaction import detect_mode
+    assert detect_mode("⏵⏵ bypass permissions on (shift+tab to cycle)") == "bypass"
+    assert detect_mode("⏵⏵ accept edits on (shift+tab to cycle)") == "autonomous"
+    assert detect_mode("plan mode on") == "plan"
+    assert detect_mode("nothing here") is None
+
+
+def test_bypass_acceptance_is_surfaced_never_auto_answered():
+    layer, frames = _layer()
+    text = ("By proceeding, you accept all responsibility for actions taken.\n"
+            "❯ 1. No, exit\n  2. Yes, I accept\n")
+    q = layer.scan("s_by", "claude", text)
+    assert q is not None and q.pattern.id == "claude.bypass_accept"
+    assert list(q.choices) == ["No, exit", "Yes, I accept"]
+    assert layer.answer_bytes(q.id, "2") == "2\r"

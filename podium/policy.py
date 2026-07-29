@@ -10,6 +10,7 @@ not a silent skip. The brokered `peer` MCP tool is a Stage C surface.
 """
 
 import json
+import sys
 from pathlib import Path
 
 PEER_BINARIES = ("claude", "gemini", "codex", "podium", "podiumd")
@@ -27,12 +28,55 @@ def hooks_path(worktree: str) -> Path:
     return Path(worktree) / ".podium" / "hooks.jsonl"
 
 
+def write_peer_shims(worktree: str) -> Path:
+    """Decision-50 enforcement that no permission setting can switch off.
+
+    Verified empirically: under `--dangerously-skip-permissions` the CLI ignores
+    hook denials, so a policy-layer deny is not enough. These shims sit first on the
+    worker's PATH, so invoking another harness fails at the OS level in *every*
+    autonomy mode. The hook (guard.py) stays as defense in depth + logging.
+    """
+    bin_dir = Path(worktree) / ".podium" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name in PEER_BINARIES:
+        shim = bin_dir / name
+        shim.write_text(
+            "#!/bin/sh\n"
+            f'echo "Blocked by Podium policy: this session may not invoke \'{name}\'."'
+            " >&2\n"
+            'echo "Direct harness-to-harness calls are denied in every autonomy mode'
+            ' (decision 50); the orchestrator brokers peer calls when that surface'
+            ' ships." >&2\n'
+            "exit 126\n"
+        )
+        shim.chmod(0o755)
+    return bin_dir
+
+
+def worker_env(worktree: str, base: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for a worker session: peer shims first on PATH, API keys stripped
+    (subscription auth only), and inherited child-session markers removed — those
+    silently disable the CLI's transcript saving, which breaks session visibility
+    and resume (observed in a real run)."""
+    import os
+    env = dict(os.environ if base is None else base)
+    env["PATH"] = f"{write_peer_shims(worktree)}:{env.get('PATH', '')}"
+    for key in list(env):
+        if key.startswith("CLAUDE_CODE_") or key in (
+                "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY",
+                "GOOGLE_API_KEY", "CLAUDECODE"):
+            env.pop(key, None)
+    return env
+
+
 # Autonomy modes for a worker session (the Stage-A slice of the autonomy spectrum,
 # decision 7). The peer-call deny (decision 50) applies in EVERY mode — deny rules
 # take precedence over allow rules, so autonomy never widens into other harnesses.
 AUTONOMY_MODES = {
     "supervised": "edits auto-accepted; commands ask (Podium surfaces the dialog)",
     "autonomous": "edits and tools auto-accepted; only denied actions stop it",
+    "bypass": "asks nothing at all (--dangerously-skip-permissions); the peer-call "
+              "guard still blocks other harnesses",
 }
 DEFAULT_AUTONOMY = "supervised"
 
@@ -48,14 +92,20 @@ def write_claude_settings(worktree: str, autonomy: str = DEFAULT_AUTONOMY) -> Pa
     pdir.mkdir(parents=True, exist_ok=True)
     log = hooks_path(worktree)
     append_cmd = f"cat >> {json.dumps(str(log))}"
+    # PreToolUse runs the guard: it logs AND enforces the peer-call deny. Hooks run
+    # in every autonomy mode, so the decision-50 policy survives even bypass mode,
+    # where permission rules are skipped entirely.
+    guard_cmd = f"{json.dumps(sys.executable)} -m podium.guard {json.dumps(str(log))}"
     settings = {
         "permissions": {
             "deny": [f"Bash({b} *)" for b in PEER_BINARIES]
                     + [f"Bash({b})" for b in PEER_BINARIES],
-            "allow": AUTONOMOUS_ALLOW if autonomy == "autonomous" else [],
+            "allow": AUTONOMOUS_ALLOW if autonomy in ("autonomous", "bypass") else [],
         },
         "hooks": {
-            event: [{"hooks": [{"type": "command", "command": append_cmd}]}]
+            event: [{"hooks": [{"type": "command",
+                                "command": guard_cmd if event == "PreToolUse"
+                                else append_cmd}]}]
             for event in HOOK_EVENTS
         },
     }

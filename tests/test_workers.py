@@ -63,3 +63,72 @@ def test_hook_events_tail(tmp_path):
     assert [e["hook_event_name"] for e in events] == ["PreToolUse", "Stop"]
     events2, _ = policy.read_hook_events(str(tmp_path), offset)
     assert events2 == []
+
+
+def test_bypass_mode_argv_and_guard(tmp_path):
+    """Bypass asks nothing, but the peer-call guard hook still runs — the
+    decision-50 policy must not depend on the permission system."""
+    import json as _json
+    sess = ClaudeWorker().make_session("s_b", None, str(tmp_path), "go",
+                                       autonomy="bypass")
+    assert "--dangerously-skip-permissions" in sess.argv
+    assert "--permission-mode" not in sess.argv
+    settings = _json.loads((tmp_path / ".podium" / "settings.json").read_text())
+    pre = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert "podium.guard" in pre
+    # supervised keeps the prompting permission mode
+    sess2 = ClaudeWorker().make_session("s_s", None, str(tmp_path), "go")
+    assert "--permission-mode" in sess2.argv
+    assert "--dangerously-skip-permissions" not in sess2.argv
+
+
+def test_guard_blocks_peer_calls_only():
+    from podium.guard import blocked_binary
+    for cmd in ("claude -p 'hi'", "sudo claude", "/usr/bin/gemini --acp",
+                "FOO=1 codex exec", "ls; claude --resume x", "npx claude",
+                "echo hi && podiumd"):
+        assert blocked_binary(cmd), cmd
+    for cmd in ("pytest -q", "echo claude is a name", "git commit -m 'claude'",
+                "cat ~/.claude/settings.json", "grep -r claude ."):
+        assert blocked_binary(cmd) is None, cmd
+
+
+def test_guard_exit_codes(tmp_path, monkeypatch, capsys):
+    import io
+    from podium import guard
+    log = tmp_path / "hooks.jsonl"
+    event = '{"hook_event_name":"PreToolUse","tool_name":"Bash",' \
+            '"tool_input":{"command":"claude -p hi"}}'
+    monkeypatch.setattr("sys.stdin", io.StringIO(event))
+    assert guard.main(["guard", str(log)]) == 2          # blocked
+    assert "Blocked by Podium policy" in capsys.readouterr().err
+    assert log.read_text().strip() == event              # still logged
+    ok = '{"hook_event_name":"PreToolUse","tool_name":"Bash",' \
+         '"tool_input":{"command":"pytest -q"}}'
+    monkeypatch.setattr("sys.stdin", io.StringIO(ok))
+    assert guard.main(["guard", str(log)]) == 0          # allowed
+
+
+def test_peer_shims_block_at_os_level(tmp_path):
+    """Verified need: bypass mode ignores hook denials, so decision 50 is enforced
+    by shims on PATH — no permission setting can switch that off."""
+    import subprocess
+    bin_dir = policy.write_peer_shims(str(tmp_path))
+    env = policy.worker_env(str(tmp_path))
+    assert env["PATH"].startswith(str(bin_dir))
+    for name in ("claude", "gemini", "codex"):
+        proc = subprocess.run([str(bin_dir / name), "--version"],
+                              capture_output=True, text=True)
+        assert proc.returncode == 126
+        assert "Blocked by Podium policy" in proc.stderr
+
+
+def test_worker_env_strips_child_session_and_keys(monkeypatch, tmp_path):
+    """Inherited CLAUDE_CODE_* markers silently disable the CLI's transcript
+    saving (seen in a real run), which breaks session visibility and resume."""
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
+    env = policy.worker_env(str(tmp_path))
+    assert "CLAUDE_CODE_CHILD_SESSION" not in env
+    assert "CLAUDECODE" not in env and "ANTHROPIC_API_KEY" not in env

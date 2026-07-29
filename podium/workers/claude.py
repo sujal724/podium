@@ -45,13 +45,17 @@ class ClaudeWorker(Worker):
         settings = policy.write_claude_settings(cwd, autonomy)
         # Initial prompt rides argv (starts the REPL with it already submitted) —
         # multiline-safe, unlike typing it into the PTY.
-        argv = ["claude", "--settings", str(settings), "--permission-mode", "acceptEdits"]
+        argv = ["claude", "--settings", str(settings)]
+        if autonomy == "bypass":
+            # asks nothing at all; the peer-call guard hook still runs (decision 50)
+            argv.append("--dangerously-skip-permissions")
+        else:
+            argv += ["--permission-mode", "acceptEdits"]
         if resume_key:
             # Continue the interrupted conversation instead of starting over:
             # context, plan, and completed work are all preserved (spec 005).
             argv += ["--resume", resume_key]
         if prompt:
             argv.append(prompt)
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY")}
-        return PtySession(sid, self.name, cwd, sink, argv, env=env)
+        return PtySession(sid, self.name, cwd, sink, argv,
+                          env=policy.worker_env(cwd))

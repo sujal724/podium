@@ -74,6 +74,7 @@ class Cockpit(App):
         Binding("ctrl+d", "dispatch", "run next"),
         Binding("ctrl+t", "focus_takeover", "takeover"),
         Binding("ctrl+o", "open_in_claude", "open in claude"),
+        Binding("ctrl+p", "change_mode", "change mode"),
         Binding("ctrl+b", "focus_board", "board"),
         Binding("ctrl+q", "quit", "quit"),
         Binding("escape", "send_escape", "esc → session"),
@@ -98,8 +99,10 @@ class Cockpit(App):
             return
         info = self.session_info.get(sid, {})
         mode = info.get("autonomy", "supervised")
-        mode_txt = ("AUTONOMOUS · runs tools without asking" if mode == "autonomous"
-                    else "SUPERVISED · asks you before running commands")
+        mode_txt = {
+            "bypass": "BYPASS · asks nothing (peer-call guard still on)",
+            "autonomous": "AUTONOMOUS · runs tools without asking",
+        }.get(mode, "SUPERVISED · asks you before running commands")
         resumed = " · resumed" if info.get("resumed") else ""
         bar.update(f" {sid} · {info.get('label', '?')} · {mode_txt}{resumed}"
                    f" · ctrl+o open in claude · ctrl+t takeover")
@@ -395,6 +398,29 @@ class Cockpit(App):
         with self.suspend():
             subprocess.run(argv, cwd=cwd)
         self.refresh()
+
+    async def action_change_mode(self) -> None:
+        """Modes are not fixed at spawn: switch a live session's permission mode."""
+        sid = self.selected_session
+        if sid is None:
+            return
+        labels = ["supervised — ask me before commands",
+                  "autonomous — run tools, don't ask",
+                  "bypass — ask nothing at all"]
+        modes = ["supervised", "autonomous", "bypass"]
+
+        def picked(choice: int | None):
+            if choice:
+                asyncio.create_task(self._send(
+                    {"type": "session.mode", "session_id": sid,
+                     "mode": modes[choice - 1]}))
+                info = self.session_info.setdefault(sid, {})
+                info["autonomy"] = modes[choice - 1]
+                self._update_session_bar()
+
+        self.push_screen(QuestionDialog(
+            f"session {sid}", "Permission mode for this running session "
+            "(takes effect immediately):", labels), picked)
 
     async def _rpc(self, frame: dict, reply_type: str | None = None) -> list[dict]:
         """One-shot request on a side connection (the main socket is a live stream)."""

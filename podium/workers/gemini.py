@@ -38,8 +38,7 @@ class GeminiWorker(Worker):
         # No settings-level deny surface wired yet: the peer-call deny rides the task
         # preamble (policy.PREAMBLE_DENY, prepended by the dispatcher) — recorded
         # increment, see surfaces.py `peer.deny`.
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY")}
-        _ = policy  # deny lands in the prompt for this adapter
+        # peer shims on PATH enforce the deny at OS level for this adapter too
+        env = policy.worker_env(cwd)
         argv = ["gemini"] + (["-i", prompt] if prompt else [])
         return PtySession(sid, self.name, cwd, sink, argv, env=env)

@@ -145,6 +145,32 @@ class Daemon:
         self.last_winsize = (int(f["rows"]), int(f["cols"]))
         self.manager.resize(f["session_id"], int(f["rows"]), int(f["cols"]))
 
+    async def on_session_mode(self, f: dict) -> dict:
+        """Change a RUNNING session's permission mode (spec 006): drive the CLI's
+        own shift+tab cycle until its status line reports the target mode. Modes are
+        not fixed at spawn — a supervised session can go autonomous mid-flight and
+        back, like taking the wheel."""
+        from podium.interaction import CYCLE_KEY, detect_mode
+        sid, target = f["session_id"], f["mode"]
+        sess = self.manager.sessions.get(sid)
+        if sess is None:
+            return protocol.error(f"no live session {sid}")
+        if target not in ("supervised", "autonomous", "bypass", "plan"):
+            return protocol.error(f"unknown mode {target!r}")
+        for _ in range(6):                       # the CLI cycles a short ring
+            current = detect_mode(sess.backlog()[-4000:])
+            if current == target or (current is None and target == "supervised"):
+                break
+            await sess.write(CYCLE_KEY)
+            await asyncio.sleep(0.4)
+        sess.autonomy = target
+        self.state.execute("UPDATE sessions SET kind=kind WHERE id=?", (sid,))
+        self.sink.emit(protocol.session_status(sid, sess.status))
+        self.sink.emit(protocol.narration(
+            sess.task_id, f"[{sid}] mode → {target} (live change)"))
+        return {"type": "session.mode", "session_id": sid, "mode": target,
+                "detected": detect_mode(sess.backlog()[-4000:])}
+
     async def on_winsize(self, f: dict) -> None:
         """Cockpit pane size, remembered so future PTYs spawn at it (spec 003 rev 2)."""
         self.last_winsize = (int(f["rows"]), int(f["cols"]))

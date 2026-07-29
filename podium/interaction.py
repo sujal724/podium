@@ -81,7 +81,34 @@ PATTERNS: list[PromptPattern] = [
         "The worker needs your approval to proceed (see the session pane for the "
         "command).", (), dynamic=True,
     ),
+    # Bypass mode's own risk acceptance. Podium NEVER answers this itself — the
+    # operator accepts the risk or doesn't, whatever mode was requested.
+    PromptPattern(
+        "claude.bypass_accept", ("claude",), "youacceptallresponsibility",
+        "Bypass mode asks you to accept full responsibility for unprompted actions "
+        "in this session. Podium will not answer this for you.", (), dynamic=True,
+    ),
 ]
+
+# What a live session's permission mode looks like in the CLI's own status line,
+# and the mode each maps to. Used to switch modes on a RUNNING session (spec 006).
+MODE_MARKERS = {
+    "bypassinglepermissions": "bypass",
+    "bypasspermissionson": "bypass",
+    "acceptedidson": "autonomous",
+    "accepteditson": "autonomous",
+    "planmodeon": "plan",
+}
+CYCLE_KEY = "\x1b[Z"        # shift+tab — the CLI's own mode cycle
+
+
+def detect_mode(text: str) -> str | None:
+    """Read the session's current permission mode off its status line."""
+    flat = canonicalize(text)
+    for marker, mode in MODE_MARKERS.items():
+        if marker in flat:
+            return mode
+    return None
 
 
 @dataclass
