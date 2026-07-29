@@ -204,9 +204,12 @@ class Dispatcher:
                     session_id,
                     ti.get("subagent_type") or ti.get("description") or "subagent",
                     (ti.get("description") or ti.get("prompt") or "")[:300],
-                    data={"tool_input": ti})
+                    data={"tool_input": ti}, key=ev.get("tool_use_id"))
+            elif name == "PostToolUse" and tool == "Task":
+                # correlated close: subagents run in parallel, so pair by id
+                self.agents.close_subagent(session_id, ev.get("tool_use_id"))
             elif name == "SubagentStop":
-                self.agents.close_latest(session_id, "subagent", "done")
+                self.agents.close_subagent(session_id, ev.get("tool_use_id"))
             claude_sid = ev.get("session_id")
             if claude_sid and session_id not in self._linked:
                 self._link_claude_session(session_id, claude_sid, worktree, repo_root)

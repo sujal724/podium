@@ -233,3 +233,41 @@ async def test_agent_tree_records_sessions_subagents_and_peers(rig):
     await disp.interrupt_all()
     for s in list(disp.manager.sessions):
         await disp.manager.stop(s)
+
+
+async def test_parallel_subagents_pair_by_tool_use_id(rig):
+    """Claude runs subagents in PARALLEL; closing 'the latest running one' would
+    pair them wrongly. Correlate by the worker's own tool_use_id."""
+    disp, work, proj, repo = rig
+    t = work.create_task(proj, "[[ask]] [[nocommit]] parallel", status="ready")
+    await disp.run_task(t)
+    async with asyncio.timeout(15):
+        while not disp.manager.sessions:
+            await asyncio.sleep(0.05)
+    sid = next(iter(disp.manager.sessions))
+    a = disp.agents
+    a.open_subagent(sid, "explorer", "map repo", key="toolu_A")
+    a.open_subagent(sid, "reviewer", "check tests", key="toolu_B")
+    a.close_subagent(sid, "toolu_A")            # the FIRST one finishes first
+    tree = {n["label"]: n["status"] for n in a.tree(t) if n["kind"] == "subagent"}
+    assert tree == {"explorer": "done", "reviewer": "running"}
+    a.close_subagent(sid, "toolu_B")
+    tree = {n["label"]: n["status"] for n in a.tree(t) if n["kind"] == "subagent"}
+    assert tree == {"explorer": "done", "reviewer": "done"}
+    await disp.interrupt_all()
+    for s in list(disp.manager.sessions):
+        await disp.manager.stop(s)
+
+
+async def test_scope_tree_is_the_full_hierarchy(rig):
+    """F4: workspace → project → task → session → subagent/peer in one view."""
+    disp, work, proj, repo = rig
+    t = work.create_task(proj, "[[nocommit]] scoped", status="ready")
+    disp.agents.open_session("s_fake", t, "claude", detail="scoped")
+    disp.agents.open_subagent("s_fake", "explorer", key="k1")
+    disp.agents.record_peer("s_fake", "gemini", "gemini -p hi")
+    nodes = disp.agents.scope_tree(work)
+    kinds = [(n["kind"], n["depth"]) for n in nodes]
+    assert ("workspace", 0) in kinds and ("project", 1) in kinds
+    assert ("task", 2) in kinds and ("session", 3) in kinds
+    assert ("subagent", 4) in kinds and ("peer", 4) in kinds

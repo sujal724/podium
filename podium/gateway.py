@@ -333,6 +333,11 @@ class Daemon:
         return {"type": "agents.tree", "task_id": f["task_id"],
                 "agents": self.dispatcher.agents.tree(f["task_id"])}
 
+    async def on_agents_scope(self, f: dict) -> dict:
+        """The whole hierarchy: workspace → project → task → session → subagent/peer."""
+        return {"type": "agents.scope",
+                "nodes": self.dispatcher.agents.scope_tree(self.work)}
+
     # quota + surfaces
     async def on_quota_query(self, f: dict) -> dict:
         return {"type": "quota.snapshot",

@@ -39,7 +39,7 @@ class AgentTree:
         return aid
 
     def open_subagent(self, session_id: str, label: str, detail: str = "",
-                      data: dict | None = None) -> str | None:
+                      data: dict | None = None, key: str | None = None) -> str | None:
         """A native subagent of a session (intra-vendor fan-out). Parented to the
         session's node so the tree shows who spawned whom."""
         parent = self._session_node(session_id)
@@ -51,15 +51,33 @@ class AgentTree:
             "detail,status,started_at,data) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (aid, parent["task_id"], session_id, parent["id"], "subagent",
              parent["worker"], label, detail, "running", now(),
-             json.dumps(data or {})),
+             json.dumps((data or {}) | {"key": key})),
         )
         self.sink.emit(protocol.narration(
             parent["task_id"], f"[{session_id}] subagent started: {label}"))
         self._emit(parent["task_id"])
         return aid
 
+    def close_subagent(self, session_id: str, key: str | None,
+                       status: str = "done") -> None:
+        """Close by the worker's own tool_use_id when we have it — subagents run in
+        PARALLEL, so closing "the latest running one" would pair them wrongly."""
+        if key:
+            rows = self.state.query(
+                "SELECT id FROM agents WHERE session_id=? AND kind='subagent'"
+                " AND status='running' AND json_extract(data,'$.key')=? LIMIT 1",
+                (session_id, key))
+            if rows:
+                self.state.execute(
+                    "UPDATE agents SET status=?, ended_at=? WHERE id=?",
+                    (status, now(), rows[0]["id"]))
+                self._emit(self._task_of(rows[0]["id"]))
+                return
+        self.close_latest(session_id, "subagent", status)
+
     def close_latest(self, session_id: str, kind: str = "subagent",
                      status: str = "done") -> None:
+        """Fallback when no correlation id is available (e.g. a bare SubagentStop)."""
         rows = self.state.query(
             "SELECT id FROM agents WHERE session_id=? AND kind=? AND status='running'"
             " ORDER BY started_at DESC, rowid DESC LIMIT 1", (session_id, kind))
@@ -115,6 +133,31 @@ class AgentTree:
         walk(None, 0)
         seen = {n["id"] for n in out}
         out += [r | {"depth": 0} for r in rows if r["id"] not in seen]  # orphans
+        return out
+
+    def scope_tree(self, work) -> list[dict]:
+        """The whole hierarchy in one list: workspace → project → task → session →
+        subagent/peer. Depth is cumulative, so a client renders it by indenting."""
+        board = work.board()
+        out: list[dict] = []
+        tasks_by_project: dict[str, list] = {}
+        for t in board["tasks"]:
+            tasks_by_project.setdefault(t["project_id"], []).append(t)
+        projects_by_ws: dict[str, list] = {}
+        for p in board["projects"]:
+            projects_by_ws.setdefault(p["workspace_id"], []).append(p)
+        for ws in board["workspaces"]:
+            out.append({"kind": "workspace", "id": ws["id"], "label": ws["name"],
+                        "status": "", "depth": 0})
+            for proj in projects_by_ws.get(ws["id"], []):
+                out.append({"kind": "project", "id": proj["id"],
+                            "label": proj["name"], "status": "", "depth": 1})
+                for task in tasks_by_project.get(proj["id"], []):
+                    out.append({"kind": "task", "id": task["id"],
+                                "label": task["title"], "status": task["status"],
+                                "depth": 2})
+                    for node in self.tree(task["id"]):
+                        out.append(node | {"depth": node["depth"] + 3})
         return out
 
     def _session_node(self, session_id: str):

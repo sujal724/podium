@@ -39,3 +39,30 @@ so shipped semantics stay stable (decision 44).
   child attributed to the spawning session.
 - **F2** peer reports carry the command and the session that made them.
 - **F3** the tree renders parent-before-child with depth, orphans included.
+
+## The full hierarchy (operator question, 2026-07-29)
+
+```
+workspace                     organizational scope
+└─ project                    a repo (repo_root + base_branch)
+   └─ task                    the unit of work; owns ONE git worktree + task/<id> branch
+      └─ session              a worker CLI Podium spawned in that worktree (◆)
+         ├─ subagent          spawned natively by that session, e.g. Claude's Task
+         │                    tool — including Claude-spawning-Claude (└─◇)
+         └─ peer              an attempt to invoke another harness (⚠)
+```
+
+Isolation is **per task**: one worktree, one branch, one reviewable diff. Sessions are
+*within* a task and are not 1:1 with it — a rejected or interrupted task is re-run as a
+new session over the same branch (resumed in place when it was interrupted, spec 005).
+Subagents and peers live inside a session and inherit its task and worktree.
+
+`podium tree` renders the whole hierarchy; `podium tree <task_id>` renders one task's
+actors. **F4** covers the scope view.
+
+### Correlating parallel subagents
+
+A session can run several subagents **at once**, so closing "the latest running one"
+pairs them wrongly. Hook payloads carry `tool_use_id` (verified against the real CLI),
+so open/close are correlated by that id, with the latest-running close kept only as a
+fallback for events that carry no id. **F5**.
