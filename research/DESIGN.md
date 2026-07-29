@@ -550,6 +550,9 @@ I1 lands around M3–M5; the Autonomy Controller in M6 leans on I3's verifier).
     (config/env/commit-template) and the verifier/pre-merge gate rejects commits with wrong
     authorship. Authorship *provenance* is still tracked internally (decision 39) — the system
     always knows which agent produced what — it just isn't written into public git metadata.
+    **Extended 2026-07-29 to all public artifacts:** PR titles/bodies, issues, review comments,
+    changelogs, release notes — no "Generated with …" badges or AI attribution of any kind,
+    enforced by Podium's templates and the pre-merge/publish gate (ADR-0004).
 49. **Quota is read, not estimated** (operator ruling, 2026-07-27, supersedes the "estimated
     gauge" language). The operator can see real quota numbers on every service; Podium reads the
     same authenticated, own-account surfaces rather than estimating: Claude — the CLI's `/usage`
