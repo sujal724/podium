@@ -107,6 +107,31 @@ def cmd_quota(args) -> None:
     _print(asyncio.run(_rpc({"type": "quota.query"})))
 
 
+def cmd_pending(args) -> None:
+    frames = asyncio.run(_rpc({"type": "interaction.pending"}))
+    for f in frames:
+        if f["type"] != "approval.pending":
+            _print([f])
+            continue
+        if not f["requests"]:
+            print("no pending approvals")
+        for r in f["requests"]:
+            opts = " | ".join(o["id"] for o in r["options"])
+            print(f"{r['id']}  [{r['session_id']}]  {r['title']}  ({opts})")
+            if r.get("detail"):
+                print(f"    {r['detail']}")
+
+
+def cmd_answer(args) -> None:
+    _print(asyncio.run(_rpc({"type": "answer.native", "session_id": args.session_id,
+                             "request_id": args.request_id, "value": args.value})))
+
+
+def cmd_mode(args) -> None:
+    _print(asyncio.run(_rpc({"type": "session.mode", "session_id": args.session_id,
+                             "mode": args.mode})))
+
+
 def cmd_daemon(args) -> None:
     from podium.gateway import main as daemon_main
     daemon_main()
@@ -199,6 +224,19 @@ def main() -> None:
     s.set_defaults(fn=cmd_reject)
 
     sub.add_parser("quota").set_defaults(fn=cmd_quota)
+
+    sub.add_parser("pending", help="list pending native approval prompts")\
+        .set_defaults(fn=cmd_pending)
+
+    s = sub.add_parser("answer", help="answer a native approval prompt")
+    s.add_argument("session_id"); s.add_argument("request_id")
+    s.add_argument("value", help="one of the prompt's option ids")
+    s.set_defaults(fn=cmd_answer)
+
+    s = sub.add_parser("mode", help="set a session's approval mode (SDK "
+                                    "permission mode / ACP setSessionMode)")
+    s.add_argument("session_id"); s.add_argument("mode")
+    s.set_defaults(fn=cmd_mode)
 
     s = sub.add_parser("send", help="send a raw wire frame")
     s.add_argument("frame_type"); s.add_argument("--json")

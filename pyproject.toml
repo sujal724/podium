@@ -10,6 +10,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+sdk = ["claude-agent-sdk>=0.1.0"]
 
 [project.scripts]
 podium = "podium.cli:main"

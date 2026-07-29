@@ -1,8 +1,10 @@
-"""Wire frames (LLD §18 subset for Stage A). One JSON object per WS message.
+"""Wire frames (LLD §18 subset for Stages A–B). One JSON object per WS message.
 
 Server→client constructors live here so every emitter produces the same shape.
-Additions over §18 (recorded in specs/001 plan): `task.run`, `review.approve`,
-`review.reject`, and the `blocked` answer frame for later-stage surfaces.
+Additions over §18 (recorded in specs/001 + specs/002 plans): `task.run`,
+`review.approve`, `review.reject`, the `blocked` answer frame for later-stage
+surfaces, and the interaction-layer set (`approval.request`/`approval.resolved`
+out; `answer.native`/`interaction.pending`/`session.mode` in).
 """
 
 import json
@@ -39,6 +41,18 @@ def session_status(session_id: str, status: str) -> dict:
 
 def question(session_id: str, q: dict) -> dict:
     return _f("question", session_id=session_id, question=q)
+
+
+def approval_request(session_id: str, request: dict) -> dict:
+    """A native approval callback surfaced as the one uniform prompt (LLD §18.2).
+    `request` = {id, kind, title, detail, options:[{id,label,kind}], meta?}."""
+    return _f("approval.request", session_id=session_id, request=request)
+
+
+def approval_resolved(session_id: str, request_id: str, value: str,
+                      actor: str = "human") -> dict:
+    return _f("approval.resolved", session_id=session_id, request_id=request_id,
+              value=value, actor=actor)
 
 
 def work_snapshot(data: dict) -> dict:

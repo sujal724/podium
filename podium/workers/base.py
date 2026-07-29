@@ -37,8 +37,20 @@ class Worker(ABC):
 
     @abstractmethod
     def make_session(
-        self, sid: str, sink: Sink, cwd: str, prompt: str, kind: str | None = None
+        self, sid: str, sink: Sink, cwd: str, prompt: str, kind: str | None = None,
+        interaction=None,
     ) -> Session: ...
+
+    def check_kind(self, kind: str | None) -> str:
+        """Resolve the requested session kind against this worker's registered
+        kinds — an unknown kind is an honest error, never a silent PTY fallback."""
+        if kind is None:
+            return self.kinds[0]
+        if kind not in self.kinds:
+            raise WorkerUnavailable(
+                f"worker {self.name!r} has no session kind {kind!r} "
+                f"(kinds: {self.kinds})")
+        return kind
 
     @staticmethod
     def _on_path(binary: str) -> bool:

@@ -18,6 +18,7 @@ import podium
 from podium import protocol
 from podium.config import CONFIG
 from podium.dispatcher import Dispatcher
+from podium.interaction import InteractionLayer
 from podium.manager import SessionManager
 from podium.metering import Meter
 from podium.sink import Sink
@@ -33,7 +34,8 @@ class Daemon:
         self.sink = Sink()
         self.state = StateStore(state_db or CONFIG.state_db)
         self.work = WorkStore(self.state, self.sink)
-        self.manager = SessionManager(self.sink, self.state)
+        self.interaction = InteractionLayer(self.sink)
+        self.manager = SessionManager(self.sink, self.state, self.interaction)
         self.meter = Meter(self.state, self.sink)
         from podium.workspace import WorkspaceManager
         self.workspaces = WorkspaceManager(workdir or CONFIG.workdir)
@@ -114,8 +116,30 @@ class Daemon:
         await self.manager.write(f["session_id"], f["text"])
 
     async def on_answer(self, f: dict) -> None:
-        # Native approval routing is a Stage B surface; PTY answer = write + newline.
+        # One uniform answer path: a pending native approval resolves through the
+        # interaction layer; anything else is the Stage-A PTY write + newline.
+        rid = f.get("request_id") or f.get("question_id")
+        if rid and rid in self.interaction:
+            self.interaction.answer(rid, f["value"], actor=f.get("actor", "human"),
+                                    session_id=f.get("session_id"))
+            return
         await self.manager.write(f["session_id"], str(f["value"]) + "\r")
+
+    # interaction layer (Stage B, spec 002)
+    async def on_answer_native(self, f: dict) -> dict:
+        self.interaction.answer(f["request_id"], f["value"],
+                                actor=f.get("actor", "human"),
+                                session_id=f.get("session_id"))
+        return {"type": "answer.ack", "request_id": f["request_id"]}
+
+    async def on_interaction_pending(self, f: dict) -> dict:
+        return {"type": "approval.pending",
+                "requests": self.interaction.pending(f.get("session_id"))}
+
+    async def on_session_mode(self, f: dict) -> dict:
+        await self.manager.set_mode(f["session_id"], f["mode"])
+        return {"type": "mode.set", "session_id": f["session_id"],
+                "mode": f["mode"]}
 
     async def on_stop(self, f: dict) -> None:
         await self.manager.stop(f["session_id"])

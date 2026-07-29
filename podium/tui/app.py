@@ -1,8 +1,9 @@
 """The Podium cockpit (Textual) — the visibility invariant as a screen.
 
 Panes: board (full hierarchy), live session (PTY stream + takeover input), review
-(diff + approve/reject), approval inbox, quota gauge, event feed — and one explicit
-`blocked` pane per not-yet-live surface (decision 44), stage-labelled, never hidden.
+(diff + approve/reject), approval inbox, native approvals (the uniform prompt —
+y=allow / n=deny the oldest), quota gauge, event feed — and one explicit `blocked`
+pane per not-yet-live surface (decision 44), stage-labelled, never hidden.
 
 Connects to podiumd over the wire protocol like any other client.
 """
@@ -35,6 +36,8 @@ class Cockpit(App):
     BINDINGS = [
         Binding("a", "approve", "approve"),
         Binding("r", "reject", "reject"),
+        Binding("y", "allow", "allow prompt"),
+        Binding("n", "deny", "deny prompt"),
         Binding("d", "dispatch", "run next"),
         Binding("q", "quit", "quit"),
     ]
@@ -45,6 +48,7 @@ class Cockpit(App):
         self.selected_session: str | None = None
         self.selected_task: str | None = None
         self.review_task: str | None = None
+        self.pending_approvals: list[dict] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -63,6 +67,8 @@ class Cockpit(App):
                         yield RichLog(id="review-log", highlight=True, wrap=False)
                     with TabPane("inbox", id="tab-inbox"):
                         yield RichLog(id="inbox-log", wrap=True)
+                    with TabPane("approvals", id="tab-approvals"):
+                        yield RichLog(id="approvals-log", wrap=True)
                     with TabPane("feed", id="tab-feed"):
                         yield RichLog(id="feed-log", wrap=True)
                     for s in blocked_surfaces():
@@ -87,6 +93,7 @@ class Cockpit(App):
         await self._send({"type": "work.list"})
         await self._send({"type": "quota.query"})
         await self._send({"type": "task.inbox"})
+        await self._send({"type": "interaction.pending"})
         async for raw in self.ws:
             self._on_frame(protocol.loads(raw))
 
@@ -128,6 +135,18 @@ class Cockpit(App):
                           "proposed tasks land here")
             for task in f["tasks"]:
                 log.write(f"{task['id']}  [{task.get('detector')}]  {task['title']}")
+        elif t == "approval.request":
+            self.pending_approvals.append(f["request"])
+            self._render_approvals()
+            feed.write(f"❓ {f['request']['title']} — approvals tab, y/n")
+        elif t == "approval.resolved":
+            self.pending_approvals = [r for r in self.pending_approvals
+                                      if r["id"] != f["request_id"]]
+            self._render_approvals()
+            feed.write(f"✓ approval {f['request_id']} → {f['value']} ({f['actor']})")
+        elif t == "approval.pending":
+            self.pending_approvals = list(f["requests"])
+            self._render_approvals()
         elif t in ("quota.update", "quota.snapshot"):
             self._render_quota(f)
         elif t == "narration":
@@ -158,6 +177,37 @@ class Cockpit(App):
                 leaf = node.add_leaf(label)
                 leaf.data = task["id"]
         tree.root.expand()
+
+    def _render_approvals(self) -> None:
+        log = self.query_one("#approvals-log", RichLog)
+        log.clear()
+        if not self.pending_approvals:
+            log.write("no pending approvals — native prompts (SDK can_use_tool, "
+                      "ACP request_permission) land here; y=allow n=deny the oldest")
+            return
+        for r in self.pending_approvals:
+            opts = " / ".join(o["id"] for o in r["options"])
+            log.write(f"{r['id']}  [{r['session_id']}]  {r['title']}  ({opts})")
+            if r.get("detail"):
+                log.write(f"    {r['detail']}")
+
+    @staticmethod
+    def _pick_option(request: dict, allow: bool) -> str:
+        """The uniform prompt carries driver-native options; map y/n onto them by
+        their ACP-style kind, falling back to first (allow) / last (deny)."""
+        prefix = "allow" if allow else "reject"
+        for o in request["options"]:
+            if o.get("kind", "").startswith(prefix):
+                return o["id"]
+        return request["options"][0 if allow else -1]["id"]
+
+    async def _answer_oldest(self, allow: bool) -> None:
+        if not self.pending_approvals:
+            return
+        request = self.pending_approvals[0]
+        await self._send({"type": "answer.native", "session_id": request["session_id"],
+                          "request_id": request["id"],
+                          "value": self._pick_option(request, allow)})
 
     def _render_quota(self, f: dict) -> None:
         gauge = self.query_one("#quota", Static)
@@ -195,6 +245,12 @@ class Cockpit(App):
                               "feedback": "rejected from cockpit (add detail via CLI "
                                           "`podium reject <id> <feedback>`)"})
             self.review_task = None
+
+    async def action_allow(self) -> None:
+        await self._answer_oldest(True)
+
+    async def action_deny(self) -> None:
+        await self._answer_oldest(False)
 
     async def action_dispatch(self) -> None:
         await self._send({"type": "run.next"})

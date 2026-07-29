@@ -25,6 +25,7 @@ class CodexWorker(Worker):
                             tos="gray", headless_ok=False, hint=hint)
 
     def make_session(self, sid: str, sink: Sink, cwd: str, prompt: str,
-                     kind: str | None = None) -> Session:
+                     kind: str | None = None, interaction=None) -> Session:
+        self.check_kind(kind)
         from podium.sessions.pty import PtySession
         return PtySession(sid, self.name, cwd, sink, ["codex"])

@@ -10,10 +10,11 @@ from podium.workers.base import WORKERS, WorkerUnavailable
 
 
 class SessionManager:
-    def __init__(self, sink: Sink, state: StateStore) -> None:
+    def __init__(self, sink: Sink, state: StateStore, interaction=None) -> None:
         self.sessions: dict[str, Session] = {}
         self._sink = sink
         self._state = state
+        self._interaction = interaction
 
     def availability(self) -> list[dict]:
         out = []
@@ -31,7 +32,8 @@ class SessionManager:
         if not av.ok:
             raise WorkerUnavailable(av.hint or f"{worker} unavailable")
         sid = new_id("s")
-        sess = w.make_session(sid, self._sink, cwd or CONFIG.workdir, prompt, kind)
+        sess = w.make_session(sid, self._sink, cwd or CONFIG.workdir, prompt, kind,
+                              interaction=self._interaction)
         self.sessions[sid] = sess
         self._state.execute(
             "INSERT INTO sessions(id,task_id,worker,kind,cwd,status,created_at)"
@@ -54,6 +56,9 @@ class SessionManager:
 
     def resize(self, sid: str, rows: int, cols: int) -> None:
         self._get(sid).resize(rows, cols)
+
+    async def set_mode(self, sid: str, mode: str) -> None:
+        await self._get(sid).set_mode(mode)
 
     def mark_ended(self, sid: str) -> None:
         sess = self.sessions.get(sid)

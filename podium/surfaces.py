@@ -37,7 +37,11 @@ SURFACES: dict[str, Surface] = {
         # --- Stage B ---
         Surface(
             "interaction", "Interaction layer (native approvals, uniform prompts)", "B",
-            False, "", ("answer.native",),
+            True,
+            "Native callbacks live: Claude SDK can_use_tool (kind `sdk`) + ACP "
+            "request_permission/set_mode (kind `acp`) → one uniform prompt. "
+            "Sentinel + clarifier degraded fallbacks are registered increments.",
+            ("answer.native", "interaction.pending", "session.mode"),
         ),
         Surface("ingestion", "Resource ingestion (fetch→parse→chunk→index)", "B", False,
                 "", ("resource.add",)),
