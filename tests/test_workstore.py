@@ -111,3 +111,30 @@ def test_status_validation(work):
         work.update_task(t, status="nonsense")
     with pytest.raises(ValueError):
         work.create_task(p, "y", status="done")
+
+
+def test_additive_migration_on_legacy_db(tmp_path):
+    """Dogfood regression: CREATE TABLE IF NOT EXISTS never alters an existing
+    table, so a column added in a later version was missing from a live database
+    (v0.4.0's tasks.base_ref broke the board). Opening migrates additively."""
+    import sqlite3
+    from podium.sink import Sink
+    from podium.state import StateStore
+    from podium.work.store import WorkStore
+    path = str(tmp_path / "legacy.db")
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE tasks(id TEXT PRIMARY KEY, project_id TEXT,"
+               " parent_id TEXT, title TEXT, description TEXT, status TEXT,"
+               " priority INT, labels JSON, assignee TEXT, origin TEXT,"
+               " detector TEXT, approved_by TEXT, approved_at INT, resources JSON,"
+               " workflow TEXT, autonomy TEXT, worktree TEXT, created_at INT,"
+               " updated_at INT)")
+    db.execute("INSERT INTO tasks(id,title,status,priority,origin)"
+               " VALUES('t_old','legacy','ready',1,'human')")
+    db.commit(); db.close()
+    store = StateStore(path)
+    cols = {r["name"] for r in store.query("PRAGMA table_info(tasks)")}
+    assert "base_ref" in cols
+    task = WorkStore(store, Sink()).get_task("t_old")   # would KeyError before
+    assert task.title == "legacy" and task.base_ref is None
+    store.close()

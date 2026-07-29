@@ -10,6 +10,7 @@ If Podium isn't running from a git checkout, the updater truthfully reports
 """
 
 import asyncio
+import contextlib
 import os
 import re
 import subprocess
@@ -104,6 +105,11 @@ class SelfUpdater:
     # --- apply (operator-approved only) --------------------------------------
 
     async def apply(self, actor: str = "human") -> dict:
+        # Fetch first: apply used to judge from the LAST fetch and wrongly report
+        # "already up to date" right after a merge landed (dogfood, v0.4.0).
+        if self.repo is not None:
+            with contextlib.suppress(UpdateError):
+                await asyncio.to_thread(self._git, "fetch", "--quiet", "origin", "main")
         st = self.status()
         if not st.get("available"):
             raise UpdateError(st.get("reason", "updater unavailable"))
