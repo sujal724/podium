@@ -550,6 +550,9 @@ I1 lands around M3–M5; the Autonomy Controller in M6 leans on I3's verifier).
     (config/env/commit-template) and the verifier/pre-merge gate rejects commits with wrong
     authorship. Authorship *provenance* is still tracked internally (decision 39) — the system
     always knows which agent produced what — it just isn't written into public git metadata.
+    **Extended 2026-07-29 to all public artifacts:** PR titles/bodies, issues, review comments,
+    changelogs, release notes — no "Generated with …" badges or AI attribution of any kind,
+    enforced by Podium's templates and the pre-merge/publish gate (ADR-0004).
 49. **Quota is read, not estimated** (operator ruling, 2026-07-27, supersedes the "estimated
     gauge" language). The operator can see real quota numbers on every service; Podium reads the
     same authenticated, own-account surfaces rather than estimating: Claude — the CLI's `/usage`
@@ -560,6 +563,47 @@ I1 lands around M3–M5; the Autonomy Controller in M6 leans on I3's verifier).
     history, and reconciliation against the read numbers — not as a substitute for them. If a
     read surface breaks, the gauge says **`unavailable`** (decision 44: never fake) until the
     Updater/Watcher re-probes.
+50. **Peer harness calls — cross-vendor at any level, always brokered** (operator ruling,
+    2026-07-29). A running worker session may call on another vendor's harness when available and
+    needed, via a Podium **`peer` MCP tool** that expresses a **need, not a vendor choice**; every
+    peer request goes through the routing gate — metered by the Quota Scheduler, provenance-tagged
+    (decision 39), depth-capped — and **direct harness→harness calls are blocked by policy**.
+    Intra-vendor fan-out (a harness's own native subagents) is likewise **monitored**: native
+    hooks/OTEL feed a live subagent tree in mission-control (decision 25); no nested agent
+    activity, cross-vendor or intra-vendor, is a black box. Long form + risk analysis in
+    `CAPABILITIES.md §10`.
+51. **Transparent operator models — visibility & the no-ceiling rule** (operator ruling,
+    2026-07-29). Everything the system believes about the operator — learner-model estimates
+    (decision 33) and user-state readings (decision 38) — is **inspectable with its evidence,
+    editable, pinnable, and resettable**; operator edits are authoritative. Estimates **sequence
+    and scaffold, never gate**: a low estimate expands support and never hides, locks, or
+    withholds material, tasks, or ambition; an **effort override** ("show me the expert path
+    anyway") is always one action away and is itself first-party learning signal. Long form in
+    `CAPABILITIES.md §11`.
+52. **Quizzes & spaced repetition — opt-in, resource-first, LLM-minimal** (operator ruling,
+    2026-07-29). Active retrieval practice joins the learning layer: opt-in quizzes + an SRS
+    review queue. **Resource-first:** items come from existing materials in the Library KB
+    (exercise sets, book questions, problem banks) most of the time; the LLM is used only when
+    absolutely necessary, minimally, quota-metered (decision 40 applied to teaching). Results are
+    first-party signal into knowledge tracing (decision 33) — **signal, never gate** (decision
+    51); quizzes queue and are right-timed (decision 36), never blocking work. Long form in
+    `CAPABILITIES.md §12`.
+53. **Video in the library — curated, transcript-on-demand** (operator ruling, 2026-07-29). Video
+    becomes a curated library item kind with a watch queue beside the listen queue (decision 31);
+    its own audio is its listen mode. **Transcripts are extracted/indexed only on demand** — a
+    manual per-item action by the operator or an agent that needs it, never bulk (storage) — then
+    join the Library KB with timestamped citations as the item's reading view. Third-party video
+    is never cached (offline = transcript only); owned-file full offline is out of scope. Long
+    form in `CAPABILITIES.md §13`.
+54. **Bounded knowledge bases — many RAGs, not one** (operator ruling, 2026-07-29). Retrieval is a
+    set of **purpose-scoped KBs** with deliberate boundaries: **Code KB** (graph + chunks, worker
+    context packs), **Library KB** (docs/materials/transcripts), **Memory & Guidelines KB**
+    (→ AGENTS.md), **Ops KB** (decision 42) — and work state is queried structurally, never as
+    RAG. One shared engine (chunk/embed/FTS/RRF/rerank), **many bounded indexes** with per-KB
+    tuning (prose ≠ code ≠ transcript; Eval-Harness-tuned per KB). Every retrieval names KB +
+    scope; cross-KB use is explicit composition; per-KB **access policy** decides which agents
+    and surfaces may query which KB (workers never see personal learning state); chunks carry
+    origin-KB provenance (decision 39). Long form in `CAPABILITIES.md §14`.
 
 ---
 

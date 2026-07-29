@@ -337,3 +337,157 @@ ACP + import quota-state surfaces"; M6's Quota Scheduler gains the multi-regime 
 no-credits guard for Codex; M8's teams layer is re-founded on "native teams as composite workers".
 The four unique pillars and the intelligence track are untouched — they were already aimed at the
 empty ground, and this inventory confirms the ground is still empty.
+
+## 10. Peer harness calls — cross-vendor at any level (proposed decision 50, operator ruling 2026-07-29)
+
+**Operator requirement (2026-07-29):** cross-vendor mixing and routing may happen **at any level** —
+not only Podium assigning top-level workers, but a *running* harness session calling on another
+vendor's harness mid-task when one is available and needed (e.g., a Claude session pulling in Gemini
+for a huge-context read; Codex asking for a Claude review of its diff).
+
+**Mechanism: brokered, never direct.** Podium exposes a **`peer` tool over MCP** (the seam all three
+CLIs already speak, §1) to every worker session: `peer.request(need, constraints) → result`. The
+request expresses a **need, not a vendor choice**; it enters the **routing gate**
+(`INTELLIGENCE §6`) like any task, and the gate satisfies it with whichever expert fits — any vendor,
+an internal capability agent, or **abstain/escalate**. This extends peer routing (`INTELLIGENCE
+§6.1`) downward: peers can now *originate* requests, with the gate still in charge. Native halves the
+Registry should prefer as satisfier transports where they fit: `codex mcp-server` (Codex as a
+callable tool, §1) and Gemini **remote A2A agents**.
+
+**Direct harness→harness calls are blocked by policy** (an agent shelling out `gemini -p` from
+inside a Claude session) via the native sandbox/permission rules ×3 (§1). That naive version is
+where the operator's "will there be problems?" answer lives — each of these is real if calls bypass
+the broker, and each is closed by brokering:
+
+1. **Invisible quota burn.** A nested call drains a *different vendor's* reservoir with no
+   attribution; the Quota Scheduler (decision 20) must meter every call against the right
+   per-vendor regime (§2.2). Brokered calls are ordinary scheduled sessions — fully metered.
+2. **Routing authority conflict.** Two routers fighting — the harness's "I want Gemini" vs. our MoE
+   gate. Ruling: the inner request is a need; **the gate picks the satisfier** (which may not be the
+   vendor asked for, or any vendor at all).
+3. **Recursion/cycles.** A calls B calls A. Brokered requests carry **lineage + a call-depth cap**
+   (default depth 1; deeper is config), same validation posture as the dependency DAG (§6).
+4. **Observability holes.** Direct sub-calls bypass PTY watch/takeover, OTEL, and transcripts.
+   Brokered satisfiers are normal sessions with full live visibility.
+5. **Provenance laundering.** Peer output re-entering the caller's context must carry authorship
+   provenance (decision 39) so no agent mistakes another agent's output for ground truth.
+6. **Reward mis-attribution.** The capability matrix / bandit (decision 46) must credit the arm
+   that actually did the work; the broker records (caller, satisfier, outcome) separately.
+7. **Permission laundering.** The satisfier runs under **its own** policy for the task's
+   environment (decision 42 gates), never inheriting the caller's approvals.
+
+**Intra-vendor subagents are monitored too (operator addition 2026-07-29).** The same visibility
+requirement applies when a harness fans out *within itself* — Claude spawning Claude subagents or
+Workflows, Codex Multi-agent V2, Gemini's sequential subagents. These stay native (the delegation
+verdict of §2.2 stands) and their quota burn already lands on the caller's own reservoir, but Podium
+**observes inside the composite worker**: subagent lifecycle via native hooks (SubagentStart/Stop on
+Codex, Claude's 15+ hook set, Gemini's 11 events, §1) plus OTEL and the structured event streams feed
+a live **subagent tree** in mission-control (decision 25). Every subagent is provenance-tagged
+(decision 39; hooks report tool/session identity, §2.4) and metered, so the capability matrix
+attributes outcomes to the composite arm while the operator can still see — and intervene at — any
+level. No nested agent activity, cross-vendor or intra-vendor, is a black box.
+
+**Verdict vs harnesses: BUILD** (the broker + gate integration + subagent tree view); ingestion of
+subagent lifecycle **DELEGATEs** to native hooks/OTEL ×3, and the injection seam **DELEGATEs** to
+the native MCP clients ×3. Roadmap fit: the `peer` tool ships with the MCP intelligence seam (I-track);
+depth>1 and team-originated fan-out land with M8.
+
+## 11. Transparent operator models — visibility & the no-ceiling rule (proposed decision 51, operator ruling 2026-07-29)
+
+**Operator requirement (2026-07-29):** full visibility into "what the system thinks about me," and a
+guarantee that a low estimate can never limit the operator's learning — the operator can raise their
+effort at any time, and the system must respond to that, not to a stale label.
+
+- **Inspectable.** A **"what the system believes about me" panel** (TUI first, per decision 18):
+  every learner-model estimate (knowledge tracing, `INTELLIGENCE §11`) and user-state reading is
+  visible, each with its **evidence** — which first-party signals produced it (provenance,
+  decision 39). No hidden scores anywhere in the system.
+- **Editable, pinnable, resettable.** The operator can correct, pin, or wipe any estimate; operator
+  edits are **authoritative** (the same authority pattern as dependency edges, §6: the system
+  proposes, the human rules).
+- **The no-ceiling rule.** Model estimates **sequence and scaffold — they never gate.** A low
+  estimate *expands support* (more introductory steps offered on the learning path); it never
+  hides, locks, or withholds material, tasks, or ambition. Every learning path is skippable and
+  overridable — an **effort override** ("show me the expert path anyway") is always one action
+  away, and taking it is itself first-party signal: demonstrated effort raises estimates. The
+  models exist to serve the operator's stated ambition, not to cap it.
+- **Scope.** Extends decision 38's "human-controlled, transparent, not surveillance" from the
+  user-state model to **all** operator-modeling (learner model included), consistent with additive
+  evolution (§7) and the human-variance principle (decision 36).
+
+**Verdict vs harnesses: BUILD** — no harness models the operator at all (§2.3); transparency
+surfaces ride the existing TUI/mission-control planes (decisions 18, 25).
+
+## 12. Quizzes & spaced repetition — opt-in, resource-first, LLM-minimal (proposed decision 52, operator ruling 2026-07-29)
+
+**Operator ruling (2026-07-29):** add active **retrieval practice** to the learning layer — opt-in
+quizzes plus a **spaced-repetition queue** (items return at growing intervals) — but **LLM-minimal**:
+do not use the LLM unless absolutely necessary; point to existing resources most of the time.
+
+- **Resource-first sourcing.** Quiz items come from **existing materials** wherever possible —
+  exercise sets, book/chapter questions, curated problem banks already in the **Library KB**
+  (decision 54) — the ML-first principle (decision 40) applied to teaching. The Reasoning Provider
+  is invoked only when no suitable existing item exists, and then minimally (select/adapt, not
+  bulk-generate); every invocation is quota-metered.
+- **Signal, never gate.** Results feed knowledge tracing (decision 33) as first-party signal —
+  exactly the labeled data BKT/DKT were built on — and are subject to the **no-ceiling rule**
+  (decision 51): a score never hides, locks, or withholds anything.
+- **Interruption discipline.** Quizzes and due reviews **queue** and are right-timed to the
+  operator's state (decision 36 / user-state model); they never block work; fully opt-in.
+- The passive design stays primary: quizzes **supplement** first-party signal, not replace it.
+
+**Verdict vs harnesses: BUILD** (zero overlap, §2.4); sourcing rides Resource Ingestion; scheduling
+is a plain SRS algorithm (no ML needed at cold start).
+
+## 13. Video in the library — curated, transcript-on-demand (proposed decision 53, operator ruling 2026-07-29)
+
+**Operator ruling (2026-07-29):** video (talks, courses) becomes a first-class **curated** library
+item kind — but **transcripts are extracted and indexed only on demand**, via a manual per-item
+action triggered by the operator **or by an agent that actually needs it** — never in bulk, because
+transcripts + chunks accrue storage.
+
+- **Item model.** Curated like books/links (decision 30); the video's own audio is its listen mode
+  (no TTS needed); a **watch queue** sits beside the listen queue (decision 31).
+- **On-demand transcript.** Once requested, the transcript flows through the standard ingestion
+  pipeline into the **Library KB** (decision 54) with **timestamped citations**, and becomes the
+  item's reading view. Until requested, the item is browsable/linkable but not indexed — shown
+  honestly as unindexed (decision 44), one action away.
+- **Offline.** Third-party video is never cached/re-hosted (ToS); offline on the phone = the
+  transcript (when requested). Full offline for operator-owned files is **out of scope** (visible
+  as `blocked` if surfaced).
+
+**Verdict vs harnesses: BUILD** (library layer has zero vendor overlap, §2.4); transcript
+extraction is an ingestion-pipeline extension, not a new subsystem.
+
+## 14. Bounded knowledge bases — many RAGs, not one (proposed decision 54, operator ruling 2026-07-29)
+
+**Operator ruling (2026-07-29):** there is no one standard RAG. Retrieval is a set of
+**purpose-scoped knowledge bases (KBs)** whose boundaries we create deliberately — different
+purposes and corpora need different indexes, tuning, and access rules, and nothing bleeds between
+them by accident.
+
+- **The KB set (initial):**
+  - **Code KB** — codebase graph + code/doc chunks per repo (multi-repo, decision 43); serves
+    worker context packs (`INTELLIGENCE §4`).
+  - **Library KB** — managed-project docs, curated materials, on-demand transcripts (decision 53);
+    serves the reading room, learning paths, and quizzes (decision 52).
+  - **Memory & Guidelines KB** — cross-run facts and additive rules; distributed via AGENTS.md
+    (`INTELLIGENCE §3`).
+  - **Ops KB** — environments, connections, runtime signals for the maintainer role (decision 42).
+  - **Work state is not RAG** — the work graph/DAG is queried structurally in SQLite, never
+    retrieved fuzzily.
+- **One engine, many bounded indexes.** The shared machinery (chunkers, embedders, FTS, RRF,
+  rerank — `INTELLIGENCE §4–5`) is one codebase; each KB is its own corpus + index with **per-KB
+  chunking/embedding/rerank configuration** (prose ≠ code ≠ transcript), tuned per-KB by the Eval
+  Harness (decision 19).
+- **Boundaries are explicit.** Every retrieval names its KB and scope (workspace/project/task);
+  cross-KB queries are deliberate composition (the context-pack assembler may consult several
+  KBs), never a shared-index accident. Per-KB **access policy** governs which agent classes and
+  surfaces may query which KB — e.g. worker sessions get Code (+ the Library resources attached
+  to their task), **not** the operator's personal learning state; provenance (decision 39) tags
+  every chunk's origin KB.
+- Physical layout (one SQLite with per-KB tables vs. per-KB stores) is **provisional** — the
+  boundary is logical + policy-enforced first; LLD refines.
+
+**Verdict vs harnesses: BUILD** — no harness ships any retrieval index (§2.3); this structures the
+Context Engine we were already building rather than adding a new system.

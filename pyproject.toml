@@ -1,0 +1,27 @@
+[project]
+name = "podium"
+version = "0.1.0"
+description = "Orchestrator for AI coding agents — drives official CLIs with native work management, live visibility, quota awareness, and verification."
+requires-python = ">=3.12"
+dependencies = [
+    "websockets>=12",
+    "textual>=0.80",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+podium = "podium.cli:main"
+podiumd = "podium.gateway:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["podium*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
