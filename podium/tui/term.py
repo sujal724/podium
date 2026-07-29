@@ -111,29 +111,55 @@ class TerminalEmulator:
 
 
 class TerminalView(Widget, can_focus=False):
-    """Renders a TerminalEmulator's scrollback + live screen. Lives inside a
-    scrollable container (height: auto), so the operator can wheel back through
-    the whole transcript; the app keeps it anchored to the bottom while streaming
-    and propagates the *viewport* size to the daemon's PTY."""
+    """A FIXED-VIEWPORT terminal pane: it renders exactly the emulator's current
+    screen, never a growing document.
+
+    The previous version was content-tall and re-rendered scrollback + screen on
+    every chunk, so repaints visibly stacked ("old stuff stays, new renders on
+    top"). Real terminals don't work that way — the screen is a fixed grid and
+    scrollback is *paged into* it. pyte's HistoryScreen does exactly that
+    (`prev_page`/`next_page`), so PgUp/PgDn page history through the same grid.
+    """
 
     DEFAULT_CSS = """
-    TerminalView { height: auto; }
+    TerminalView { height: 1fr; overflow: hidden; }
     """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.emulator: TerminalEmulator | None = None
+        self.on_pty_resize = None      # callback(rows, cols), set by the app
 
     def attach(self, emulator: TerminalEmulator) -> None:
         self.emulator = emulator
-        self.refresh(layout=True)
+        self._sync_size()
+        self.refresh()
+
+    def feed(self, text: str) -> None:
+        if self.emulator is not None:
+            self.emulator.feed(text)
+            self.refresh()
+
+    def page(self, back: bool) -> None:
+        """Page scrollback through the viewport — the emulator's own mechanism."""
+        if self.emulator is None:
+            return
+        screen = self.emulator.screen
+        (screen.prev_page if back else screen.next_page)()
+        self.refresh()
+
+    def _sync_size(self) -> None:
+        area = self.content_size
+        if self.emulator is not None and area.height > 2 and area.width > 10:
+            self.emulator.resize(area.height, area.width)
+            if self.on_pty_resize is not None:
+                self.on_pty_resize(area.height, area.width)
+
+    def on_resize(self, event) -> None:
+        self._sync_size()
+        self.refresh()
 
     def render(self):
         if self.emulator is None:
             return Text("no session selected — dispatch a task or spawn a session")
-        return Text("\n").join(self.emulator.rich_full())
-
-    def get_content_height(self, container, viewport, width) -> int:
-        if self.emulator is None:
-            return 1
-        return max(1, len(self.emulator.rich_full()))
+        return Text("\n").join(self.emulator.rich_lines())

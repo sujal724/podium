@@ -14,7 +14,7 @@ import websockets
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import (Button, Footer, Header, Input, Label, RichLog, Static,
                              TabbedContent, TabPane, Tree)
@@ -59,7 +59,7 @@ class Cockpit(App):
     #board { width: 34%; border: solid $primary; }
     #main  { width: 66%; }
     #review-log, #feed-log { border: solid $primary; height: 1fr; }
-    #session-scroll { border: solid $primary; height: 1fr; }
+    #session-view { border: solid $primary; height: 1fr; }
     #session-bar { height: 1; background: $primary-darken-2; color: $text; }
     #workers { height: 4; border: solid $secondary; }
     #quota { height: 3; border: solid $warning; }
@@ -75,6 +75,8 @@ class Cockpit(App):
         Binding("ctrl+t", "focus_takeover", "takeover"),
         Binding("ctrl+o", "open_in_claude", "open in claude"),
         Binding("ctrl+p", "change_mode", "change mode"),
+        Binding("pageup", "page_back", "scroll back"),
+        Binding("pagedown", "page_forward", "scroll fwd"),
         Binding("ctrl+b", "focus_board", "board"),
         Binding("ctrl+q", "quit", "quit"),
         Binding("escape", "send_escape", "esc → session"),
@@ -122,10 +124,10 @@ class Cockpit(App):
         """PTY size = the scroll container's viewport (rows) × content width
         (cols, minus scrollbar); the view itself is content-tall."""
         try:
-            scroll = self.query_one("#session-scroll", VerticalScroll)
+            view = self.query_one("#session-view", TerminalView)
         except Exception:
             return None
-        area = scroll.content_size
+        area = view.content_size
         if area.height <= 2 or area.width <= 10:
             return None
         return area.height, max(10, area.width - 1)
@@ -160,8 +162,7 @@ class Cockpit(App):
                 with TabbedContent():
                     with TabPane("session", id="tab-session"):
                         yield Static("no session", id="session-bar")
-                        with VerticalScroll(id="session-scroll"):
-                            yield TerminalView(id="session-view")
+                        yield TerminalView(id="session-view")
                         yield Input(placeholder="takeover — text goes to the live "
                                                 "session (Enter sends)", id="takeover")
                     with TabPane("review", id="tab-review"):
@@ -262,12 +263,7 @@ class Cockpit(App):
             if self.selected_session is None:
                 self._select_session(sid)
             elif sid == self.selected_session:
-                scroll = self.query_one("#session-scroll", VerticalScroll)
-                at_bottom = scroll.scroll_offset.y >= scroll.max_scroll_y - 1
-                self.query_one("#session-view", TerminalView).refresh(layout=True)
-                if at_bottom:  # follow the stream unless the operator scrolled up
-                    self.call_after_refresh(
-                        lambda: scroll.scroll_end(animate=False))
+                self.query_one("#session-view", TerminalView).refresh()
         elif t == "snapshot":
             for info in f.get("sessions", []):
                 self.session_info[info["id"]] = info
@@ -383,6 +379,12 @@ class Cockpit(App):
     async def action_dispatch(self) -> None:
         await self._send({"type": "run.next"})
         self.query_one("#feed-log", RichLog).write("dispatch requested (run next)")
+
+    def action_page_back(self) -> None:
+        self.query_one("#session-view", TerminalView).page(back=True)
+
+    def action_page_forward(self) -> None:
+        self.query_one("#session-view", TerminalView).page(back=False)
 
     def action_focus_takeover(self) -> None:
         self.query_one("#takeover", Input).focus()
