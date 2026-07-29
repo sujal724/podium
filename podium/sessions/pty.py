@@ -6,6 +6,7 @@ takeover and daemon driving share one path.
 """
 
 import asyncio
+import codecs
 import fcntl
 import os
 import pty
@@ -32,6 +33,10 @@ class PtySession(Session):
         self._exited = asyncio.Event()
         self._rows = rows or CONFIG.pty_rows
         self._cols = cols or CONFIG.pty_cols
+        # A read can split a multibyte UTF-8 sequence; per-chunk decode corrupts it
+        # into replacement chars (glitchy emoji/box glyphs). Hold partials across
+        # reads instead.
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     async def start(self, initial_input: str | None = None) -> None:
         loop = asyncio.get_running_loop()
@@ -61,7 +66,9 @@ class PtySession(Session):
         except OSError:
             data = b""
         if data:
-            self._emit_output(data.decode(errors="replace"))
+            text = self._decoder.decode(data)
+            if text:
+                self._emit_output(text)
         else:
             self._teardown()
 
