@@ -109,18 +109,26 @@ def test_guard_exit_codes(tmp_path, monkeypatch, capsys):
     assert guard.main(["guard", str(log)]) == 0          # allowed
 
 
-def test_peer_shims_block_at_os_level(tmp_path):
-    """Verified need: bypass mode ignores hook denials, so decision 50 is enforced
-    by shims on PATH — no permission setting can switch that off."""
+def test_peer_shims_broker_through_the_daemon(tmp_path):
+    """Spec 009: shims BROKER rather than refuse — they file a request with
+    provenance and wait for the daemon's decision (which follows the session's
+    autonomy mode). With no daemon answering, the call is refused on timeout, and
+    the attempt is recorded either way. Bypass cannot skip this: the shim is on
+    PATH, not in the permission system."""
+    import json
     import subprocess
     bin_dir = policy.write_peer_shims(str(tmp_path))
-    env = policy.worker_env(str(tmp_path))
+    env = policy.worker_env(str(tmp_path), session_id="s_1", task_id="t_1")
     assert env["PATH"].startswith(str(bin_dir))
-    for name in ("claude", "gemini", "codex"):
-        proc = subprocess.run([str(bin_dir / name), "--version"],
-                              capture_output=True, text=True)
-        assert proc.returncode == 126
-        assert "Blocked by Podium policy" in proc.stderr
+    env["PODIUM_PEER_WAIT_S"] = "1"
+    proc = subprocess.run([str(bin_dir / "gemini"), "-p", "hi"],
+                          capture_output=True, text=True, env=env, timeout=60)
+    assert proc.returncode == 126
+    assert "not started" in proc.stderr
+    logged = json.loads(
+        (tmp_path / ".podium" / "peer.jsonl").read_text().strip().splitlines()[0])
+    assert logged["outcome"] == "requested"
+    assert logged["session"] == "s_1" and logged["command"] == "gemini -p hi"
 
 
 def test_worker_env_strips_child_session_and_keys(monkeypatch, tmp_path):

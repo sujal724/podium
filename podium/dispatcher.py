@@ -11,6 +11,8 @@ over the DAG is a Stage C surface.
 """
 
 import asyncio
+import json
+from pathlib import Path
 
 from podium import policy, protocol
 from podium.agents import AgentTree
@@ -44,6 +46,7 @@ class Dispatcher:
         self._linked: set[str] = set()               # sessions with resume_key stored
         self.winsize = None                          # () -> (rows, cols) | None
         self.agents = AgentTree(state, sink)         # spec 007: who is working
+        self.pending_peers: dict[str, tuple] = {}    # spec 009: awaiting you
 
     # --- dispatch -----------------------------------------------------------
 
@@ -125,7 +128,8 @@ class Dispatcher:
                 while not waiter.done():
                     hook_offset = self._ingest_hooks(wt, sess.id, hook_offset,
                                                      repo_root=proj["repo_root"])
-                    peer_offset = self._ingest_peers(wt, sess.id, peer_offset)
+                    peer_offset = self._ingest_peers(wt, sess.id, peer_offset,
+                                                     autonomy)
                     try:
                         frame = await asyncio.wait_for(scan_q.get(), timeout=HOOK_POLL_S)
                     except TimeoutError:
@@ -138,7 +142,7 @@ class Dispatcher:
                 self.sink.unsubscribe(scan_q)
                 self._ingest_hooks(wt, sess.id, hook_offset,
                                    repo_root=proj["repo_root"])
-                self._ingest_peers(wt, sess.id, peer_offset)
+                self._ingest_peers(wt, sess.id, peer_offset, autonomy)
                 self.agents.close_session(
                     sess.id, "done" if sess.exit_code == 0 else "error")
             self.manager.mark_ended(sess.id)
@@ -231,15 +235,59 @@ class Dispatcher:
                 self._link_claude_session(session_id, claude_sid, worktree, repo_root)
         return new_offset
 
-    def _ingest_peers(self, worktree: str, session_id: str, offset: int) -> int:
-        """Peer-harness attempts reported by the PATH shims — recorded whatever the
-        autonomy mode, so bypass can never make one invisible (spec 007)."""
+    def _ingest_peers(self, worktree: str, session_id: str, offset: int,
+                      autonomy: str = "supervised") -> int:
+        """Peer-harness calls reported by the shims. Recorded whatever the outcome
+        (bypass can never make one invisible, spec 007) — and `requested` ones are
+        DECIDED here by the session's autonomy mode (spec 009): autonomous/bypass
+        approve; supervised asks the operator through the same dialog as any other
+        approval. Podium can launch anything; the mode decides whether it asks."""
         events, new_offset = policy.read_peer_events(worktree, offset)
         for ev in events:
-            self.agents.record_peer(
-                ev.get("session") or session_id, ev.get("binary", "?"),
-                ev.get("command", ""), ev.get("outcome", "blocked"))
+            sid = ev.get("session") or session_id
+            outcome = ev.get("outcome", "blocked")
+            if outcome != "requested":
+                self.agents.record_peer(sid, ev.get("binary", "?"),
+                                        ev.get("command", ""), outcome)
+                continue
+            if autonomy in ("autonomous", "bypass"):
+                self._decide_peer(worktree, ev, sid, True,
+                                  f"auto-approved in {autonomy} mode")
+            else:
+                self.pending_peers[ev["id"]] = (worktree, ev, sid)
+                self.sink.emit(protocol.question(sid, {
+                    "id": f"peer:{ev['id']}", "kind": "choice",
+                    "q": f"This session wants to run another harness:\n\n"
+                         f"  {ev.get('command', '')}\n\n"
+                         "Approve? It will run as a tracked child session.",
+                    "choices": ["Approve — run it", "Deny"],
+                }))
         return new_offset
+
+    def _decide_peer(self, worktree: str, ev: dict, session_id: str, allow: bool,
+                     reason: str) -> None:
+        """Write the decision the waiting shim is polling for, and record the node."""
+        ddir = Path(worktree) / ".podium" / "peer-decisions"
+        ddir.mkdir(parents=True, exist_ok=True)
+        (ddir / f"{ev['id']}.json").write_text(
+            json.dumps({"allow": allow, "reason": reason}))
+        self.agents.record_peer(session_id, ev.get("binary", "?"),
+                                ev.get("command", ""),
+                                "allowed" if allow else "blocked")
+        self.sink.emit(protocol.narration(
+            ev.get("task") or None,
+            f"peer call {'approved' if allow else 'denied'} ({reason}): "
+            f"{ev.get('command', '')[:80]}"))
+
+    def answer_peer(self, request_id: str, allow: bool,
+                    actor: str = "human") -> bool:
+        """Operator's answer to a supervised peer request."""
+        pending = self.pending_peers.pop(request_id, None)
+        if pending is None:
+            return False
+        worktree, ev, sid = pending
+        self._decide_peer(worktree, ev, sid, allow, f"{actor} decision")
+        return True
 
     def _link_claude_session(self, session_id: str, claude_sid: str,
                              worktree: str, repo_root: str | None) -> None:

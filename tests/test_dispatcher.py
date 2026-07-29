@@ -3,6 +3,7 @@ claim → worktree → PTY run → commit → review(diff) → approve merges / 
 """
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -343,3 +344,50 @@ async def test_scope_tree_nests_subtasks(rig):
     depths = {n["label"]: n["depth"] for n in disp.agents.scope_tree(work)
               if n["kind"] == "task"}
     assert depths["A"] == 2 and depths["B"] == 3 and depths["B1"] == 4
+
+
+async def test_peer_call_brokered_by_mode(rig, tmp_path):
+    """Spec 009: Podium can launch anything — the MODE decides whether it asks.
+    autonomous/bypass auto-approve; supervised raises the operator dialog."""
+    disp, work, proj, repo = rig
+    frames = []
+    disp.sink.tap(frames.append)
+    wt = tmp_path / "wt"
+    (wt / ".podium").mkdir(parents=True)
+    disp.agents.open_session("s_x", None, "claude")
+    req = ('{"id":"r1","binary":"gemini","command":"gemini -p hi","session":"s_x",'
+           '"outcome":"requested"}\n')
+    (wt / ".podium" / "peer.jsonl").write_text(req)
+
+    # autonomous: approved without asking
+    disp._ingest_peers(str(wt), "s_x", 0, autonomy="autonomous")
+    decision = json.loads(
+        (wt / ".podium" / "peer-decisions" / "r1.json").read_text())
+    assert decision["allow"] is True
+    assert not [f for f in frames if f.get("type") == "question"]
+
+    # supervised: asks, and the operator's answer decides
+    (wt / ".podium" / "peer.jsonl").write_text(
+        req.replace('"r1"', '"r2"'))
+    disp._ingest_peers(str(wt), "s_x", 0, autonomy="supervised")
+    q = [f for f in frames if f.get("type") == "question"][-1]
+    assert q["question"]["id"] == "peer:r2"
+    assert "gemini -p hi" in q["question"]["q"]
+    assert not (wt / ".podium" / "peer-decisions" / "r2.json").exists()  # waits
+    assert disp.answer_peer("r2", False, actor="sujal")
+    assert json.loads(
+        (wt / ".podium" / "peer-decisions" / "r2.json").read_text())["allow"] is False
+    kinds = [(a["label"], a["status"]) for a in disp.agents.tree(None)] if False else None
+    rows = disp.state.query("SELECT status FROM agents WHERE kind='peer'")
+    assert {r["status"] for r in rows} == {"allowed", "blocked"}   # both recorded
+
+
+def test_peer_shim_depth_cap(tmp_path, monkeypatch):
+    """The one unconditional rule: a brokered harness may not keep spawning."""
+    from podium import peer_shim
+    monkeypatch.setenv("PODIUM_DIR", str(tmp_path / ".podium"))
+    monkeypatch.setenv("PODIUM_PEER_DEPTH", "1")
+    monkeypatch.setenv("PODIUM_SESSION_ID", "s_x")
+    assert peer_shim.main(["shim", "claude", "-p", "hi"]) == 126
+    line = json.loads((tmp_path / ".podium" / "peer.jsonl").read_text().strip())
+    assert line["outcome"] == "blocked" and "depth cap" in line["reason"]
