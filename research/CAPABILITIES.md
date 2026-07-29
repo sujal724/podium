@@ -417,3 +417,77 @@ effort at any time, and the system must respond to that, not to a stale label.
 
 **Verdict vs harnesses: BUILD** — no harness models the operator at all (§2.3); transparency
 surfaces ride the existing TUI/mission-control planes (decisions 18, 25).
+
+## 12. Quizzes & spaced repetition — opt-in, resource-first, LLM-minimal (proposed decision 52, operator ruling 2026-07-29)
+
+**Operator ruling (2026-07-29):** add active **retrieval practice** to the learning layer — opt-in
+quizzes plus a **spaced-repetition queue** (items return at growing intervals) — but **LLM-minimal**:
+do not use the LLM unless absolutely necessary; point to existing resources most of the time.
+
+- **Resource-first sourcing.** Quiz items come from **existing materials** wherever possible —
+  exercise sets, book/chapter questions, curated problem banks already in the **Library KB**
+  (decision 54) — the ML-first principle (decision 40) applied to teaching. The Reasoning Provider
+  is invoked only when no suitable existing item exists, and then minimally (select/adapt, not
+  bulk-generate); every invocation is quota-metered.
+- **Signal, never gate.** Results feed knowledge tracing (decision 33) as first-party signal —
+  exactly the labeled data BKT/DKT were built on — and are subject to the **no-ceiling rule**
+  (decision 51): a score never hides, locks, or withholds anything.
+- **Interruption discipline.** Quizzes and due reviews **queue** and are right-timed to the
+  operator's state (decision 36 / user-state model); they never block work; fully opt-in.
+- The passive design stays primary: quizzes **supplement** first-party signal, not replace it.
+
+**Verdict vs harnesses: BUILD** (zero overlap, §2.4); sourcing rides Resource Ingestion; scheduling
+is a plain SRS algorithm (no ML needed at cold start).
+
+## 13. Video in the library — curated, transcript-on-demand (proposed decision 53, operator ruling 2026-07-29)
+
+**Operator ruling (2026-07-29):** video (talks, courses) becomes a first-class **curated** library
+item kind — but **transcripts are extracted and indexed only on demand**, via a manual per-item
+action triggered by the operator **or by an agent that actually needs it** — never in bulk, because
+transcripts + chunks accrue storage.
+
+- **Item model.** Curated like books/links (decision 30); the video's own audio is its listen mode
+  (no TTS needed); a **watch queue** sits beside the listen queue (decision 31).
+- **On-demand transcript.** Once requested, the transcript flows through the standard ingestion
+  pipeline into the **Library KB** (decision 54) with **timestamped citations**, and becomes the
+  item's reading view. Until requested, the item is browsable/linkable but not indexed — shown
+  honestly as unindexed (decision 44), one action away.
+- **Offline.** Third-party video is never cached/re-hosted (ToS); offline on the phone = the
+  transcript (when requested). Full offline for operator-owned files is **out of scope** (visible
+  as `blocked` if surfaced).
+
+**Verdict vs harnesses: BUILD** (library layer has zero vendor overlap, §2.4); transcript
+extraction is an ingestion-pipeline extension, not a new subsystem.
+
+## 14. Bounded knowledge bases — many RAGs, not one (proposed decision 54, operator ruling 2026-07-29)
+
+**Operator ruling (2026-07-29):** there is no one standard RAG. Retrieval is a set of
+**purpose-scoped knowledge bases (KBs)** whose boundaries we create deliberately — different
+purposes and corpora need different indexes, tuning, and access rules, and nothing bleeds between
+them by accident.
+
+- **The KB set (initial):**
+  - **Code KB** — codebase graph + code/doc chunks per repo (multi-repo, decision 43); serves
+    worker context packs (`INTELLIGENCE §4`).
+  - **Library KB** — managed-project docs, curated materials, on-demand transcripts (decision 53);
+    serves the reading room, learning paths, and quizzes (decision 52).
+  - **Memory & Guidelines KB** — cross-run facts and additive rules; distributed via AGENTS.md
+    (`INTELLIGENCE §3`).
+  - **Ops KB** — environments, connections, runtime signals for the maintainer role (decision 42).
+  - **Work state is not RAG** — the work graph/DAG is queried structurally in SQLite, never
+    retrieved fuzzily.
+- **One engine, many bounded indexes.** The shared machinery (chunkers, embedders, FTS, RRF,
+  rerank — `INTELLIGENCE §4–5`) is one codebase; each KB is its own corpus + index with **per-KB
+  chunking/embedding/rerank configuration** (prose ≠ code ≠ transcript), tuned per-KB by the Eval
+  Harness (decision 19).
+- **Boundaries are explicit.** Every retrieval names its KB and scope (workspace/project/task);
+  cross-KB queries are deliberate composition (the context-pack assembler may consult several
+  KBs), never a shared-index accident. Per-KB **access policy** governs which agent classes and
+  surfaces may query which KB — e.g. worker sessions get Code (+ the Library resources attached
+  to their task), **not** the operator's personal learning state; provenance (decision 39) tags
+  every chunk's origin KB.
+- Physical layout (one SQLite with per-KB tables vs. per-KB stores) is **provisional** — the
+  boundary is logical + policy-enforced first; LLD refines.
+
+**Verdict vs harnesses: BUILD** — no harness ships any retrieval index (§2.3); this structures the
+Context Engine we were already building rather than adding a new system.
