@@ -31,6 +31,28 @@ def test_claude_session_strips_api_keys_and_denies_peers(monkeypatch, tmp_path):
     assert sess.argv[-1] == "do it"
 
 
+def test_munge_matches_claude_layout():
+    assert policy.munge_project_path("/home/x/.podium/work/worktrees/t_a") \
+        == "-home-x--podium-work-worktrees-t-a"
+
+
+def test_mirror_session_symlinks_into_repo_project(tmp_path):
+    base = tmp_path / "projects"
+    wt = tmp_path / "wt"
+    repo = tmp_path / "repo"
+    wt.mkdir(); repo.mkdir()
+    src_dir = base / policy.munge_project_path(str(wt))
+    src_dir.mkdir(parents=True)
+    (src_dir / "uuid-1.jsonl").write_text("{}")
+    dest = policy.mirror_session(str(wt), str(repo), "uuid-1", projects_base=base)
+    assert dest is not None and dest.is_symlink()
+    assert dest.parent.name == policy.munge_project_path(str(repo))
+    assert policy.mirror_session(str(wt), str(repo), "uuid-1",
+                                 projects_base=base) == dest  # idempotent
+    assert policy.mirror_session(str(wt), str(repo), "missing",
+                                 projects_base=base) is None
+
+
 def test_hook_events_tail(tmp_path):
     log = policy.hooks_path(str(tmp_path))
     log.parent.mkdir(parents=True)

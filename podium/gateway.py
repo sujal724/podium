@@ -145,6 +145,14 @@ class Daemon:
     async def on_list(self, f: dict) -> dict:
         return {"type": "sessions", "sessions": self.manager.list()}
 
+    async def on_sessions_list(self, f: dict) -> dict:
+        rows = self.state.query(
+            "SELECT s.id, s.task_id, s.worker, s.kind, s.status, s.resume_key,"
+            " s.cwd, s.created_at, t.title FROM sessions s"
+            " LEFT JOIN tasks t ON t.id = s.task_id"
+            " ORDER BY s.created_at DESC LIMIT ?", (int(f.get("limit", 20)),))
+        return {"type": "sessions.snapshot", "sessions": [dict(r) for r in rows]}
+
     async def on_brain_send(self, f: dict) -> dict:
         # Brain v0: acknowledge; the conversational brain rides later surfaces.
         return protocol.narration(None, "brain: noted (conversational brain is a "
@@ -261,9 +269,11 @@ class Daemon:
                   "restarts itself; clients reconnect")
 
     async def _restart_for_update(self) -> None:
-        """Stop sessions (their tasks stay `running` → auto-resume re-queues on
-        boot), free the port, re-exec the new code in place. Every step is bounded —
-        a stuck session or lingering client must never wedge the restart."""
+        """Cancel runners (tasks stay `running` → auto-resume re-queues on boot),
+        stop sessions, free the port, re-exec the new code in place. Every step is
+        bounded — a stuck session or lingering client must never wedge the restart."""
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self.dispatcher.interrupt_all("update"), timeout=10)
         for sid in list(self.manager.sessions):
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self.manager.stop(sid), timeout=10)
