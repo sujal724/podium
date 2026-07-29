@@ -269,7 +269,8 @@ class Daemon:
     async def on_review_diff(self, f: dict) -> dict:
         task = self.work.get_task(f["task_id"])
         proj = self.dispatcher._project(task)
-        diff = self.workspaces.diff(proj["repo_root"], task.id, proj["base_branch"])
+        diff = self.workspaces.diff(proj["repo_root"], task.id,
+                                    self.dispatcher.base_ref_for(task, proj))
         return protocol.review_ready(task.id, diff, self.workspaces.branch(task.id))
 
     # self-update (spec 002): watch → tell → operator-approved apply

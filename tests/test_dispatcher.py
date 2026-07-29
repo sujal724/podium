@@ -271,3 +271,35 @@ async def test_scope_tree_is_the_full_hierarchy(rig):
     assert ("workspace", 0) in kinds and ("project", 1) in kinds
     assert ("task", 2) in kinds and ("session", 3) in kinds
     assert ("subagent", 4) in kinds and ("peer", 4) in kinds
+
+
+async def test_parent_cannot_merge_before_subtasks(rig):
+    """G1 (spec 008): children branch off the parent's branch and approve deletes
+    that branch — so the parent must wait for them."""
+    disp, work, proj, repo = rig
+    parent = work.create_task(proj, "parent feature", status="ready")
+    child = work.create_task(proj, "child bit", parent_id=parent, status="ready")
+    await disp.run_task(parent)
+    await _await_status(work, parent, ("review",))
+    with pytest.raises(DispatchError, match="unfinished subtasks"):
+        await disp.approve(parent)
+    work.set_status(child, "done")
+    await disp.approve(parent)                      # now it may land
+    assert work.get_task(parent).status == "done"
+
+
+async def test_subtask_branches_off_parent_branch(rig):
+    """G2: a subtask's base is its parent's branch, created even if the parent
+    hasn't run yet — so base → parent → child stacks."""
+    disp, work, proj, repo = rig
+    parent = work.create_task(proj, "parent", status="ready")
+    child = work.create_task(proj, "child", parent_id=parent, status="ready")
+    base = disp.base_ref_for(work.get_task(child), disp._project(work.get_task(child)))
+    assert base == f"task/{parent}"
+    grandchild = work.create_task(proj, "grandchild", parent_id=child, status="ready")
+    assert disp.base_ref_for(work.get_task(grandchild),
+                             disp._project(work.get_task(grandchild))) == f"task/{child}"
+    # an explicit override wins over the parent chain
+    work.update_task(grandchild, base_ref="release/2.0")
+    assert disp.base_ref_for(work.get_task(grandchild),
+                             disp._project(work.get_task(grandchild))) == "release/2.0"

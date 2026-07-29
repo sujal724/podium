@@ -93,8 +93,11 @@ class Dispatcher:
         started = now()
         try:
             proj = self._project(task)
-            wt = self.workspaces.create(proj["repo_root"], task_id,
-                                        proj["base_branch"])
+            base_ref = self.base_ref_for(task, proj)
+            wt = self.workspaces.create(proj["repo_root"], task_id, base_ref)
+            if base_ref != proj["base_branch"]:
+                self.sink.emit(protocol.narration(
+                    task_id, f"branching off {base_ref} (parent task's branch)"))
             self.work.update_task(task_id, actor="system", worktree=wt)
             prompt = self._prompt(task)
             self.work.set_status(task_id, "running", data={"worker": worker})
@@ -146,6 +149,19 @@ class Dispatcher:
         except Exception as e:
             self.work.set_status(task_id, "blocked", data={"error": str(e)})
             self.sink.emit(protocol.error(f"task {task_id} failed to run", str(e)))
+
+    def base_ref_for(self, task, proj: dict) -> str:
+        """Branches mirror the task tree: an explicit `base_ref` wins, else a
+        subtask builds on its PARENT's branch (created if the parent hasn't run
+        yet), else the project's base branch. So base → b → subtask-of-b stacks."""
+        if task.base_ref:
+            return task.base_ref
+        if task.parent_id:
+            parent = self.work.get_task(task.parent_id)
+            parent_base = self.base_ref_for(parent, proj)
+            return self.workspaces.ensure_branch(proj["repo_root"], parent.id,
+                                                 parent_base)
+        return proj["base_branch"]
 
     def autonomy_for(self, task, proj: dict) -> str:
         """Task overrides project overrides the daemon default (decision 7's
@@ -259,7 +275,7 @@ class Dispatcher:
         # `verifying` exists now; the verifier arrives in Stage C and will gate here.
         self.work.set_status(task_id, "verifying",
                              data={"verifier": "not wired (Stage C surface)"})
-        base = proj["base_branch"]
+        base = self.base_ref_for(self.work.get_task(task_id), proj)
         if not self.workspaces.has_commits(proj["repo_root"], task_id, base):
             self.work.set_status(
                 task_id, "blocked",
@@ -278,14 +294,36 @@ class Dispatcher:
         if task.status != "review":
             raise DispatchError(f"task {task_id} is not in review (status={task.status})")
         proj = self._project(task)
+        # Children are stacked ON this task's branch and approve deletes it — so a
+        # parent cannot land while any child is unfinished (spec 008). This is also
+        # the work model: a parent is its decomposition; it is done when its parts are.
+        unfinished = [r["id"] for r in self.state.query(
+            "SELECT id FROM tasks WHERE parent_id=? AND status NOT IN"
+            " ('done','discarded')", (task_id,))]
+        if unfinished:
+            raise DispatchError(
+                f"task {task_id} has unfinished subtasks ({', '.join(unfinished)}); "
+                "they branch off it, so they must land (or be discarded) first")
+        base = self.base_ref_for(task, proj)
         try:
-            self.workspaces.approve(proj["repo_root"], task_id, proj["base_branch"])
+            self.workspaces.approve(proj["repo_root"], task_id, base)
         except GitError as e:
             self.work.set_status(task_id, "blocked", actor=actor,
                                  data={"error": f"merge failed: {e}"})
             raise
         self.work.update_task(task_id, actor=actor, worktree=None, status="done")
-        self.sink.emit(protocol.narration(task_id, f"approved and merged by {actor}"))
+        self.sink.emit(protocol.narration(
+            task_id, f"approved by {actor} — merged into {base}"))
+        # Siblings stacked on the same base now sit on an older commit: their diffs
+        # stay correct (three-dot), but they should pick the change up.
+        if task.parent_id:
+            for r in self.state.query(
+                    "SELECT id FROM tasks WHERE parent_id=? AND id!=? AND status IN"
+                    " ('ready','running','review','blocked')",
+                    (task.parent_id, task_id)):
+                self.sink.emit(protocol.narration(
+                    r["id"], f"base advanced: sibling {task_id} landed on {base} — "
+                             "re-run or merge the base in to pick it up"))
 
     async def reject(self, task_id: str, feedback: str, actor: str = "human") -> None:
         task = self.work.get_task(task_id)

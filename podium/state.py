@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, project_id TEXT, parent_id
     priority INT DEFAULT 2, labels JSON, assignee TEXT,
     origin TEXT DEFAULT 'human', detector TEXT, approved_by TEXT, approved_at INT,
     resources JSON, workflow TEXT, autonomy TEXT, worktree TEXT,
+    base_ref TEXT,                     -- explicit branch to build on;
+                                       -- else the parent task's branch, else project base
     created_at INT, updated_at INT);
 CREATE TABLE IF NOT EXISTS task_deps(from_task TEXT, to_task TEXT,
     kind TEXT DEFAULT 'blocked-by', origin TEXT DEFAULT 'human',
