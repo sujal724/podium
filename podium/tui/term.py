@@ -48,9 +48,16 @@ def _style(fg, bg, bold, italics, underscore, reverse) -> Style:
                      reverse=reverse)
 
 
+HISTORY_LINES = 5000
+
+
 class TerminalEmulator:
+    """pyte HistoryScreen-backed: the visible grid PLUS scrollback, so transcript
+    that scrolls off the live screen is kept, not lost (spec 003 rev 2)."""
+
     def __init__(self, cols: int = 120, rows: int = 40) -> None:
-        self.screen = pyte.Screen(cols, rows)
+        self.screen = pyte.HistoryScreen(cols, rows, history=HISTORY_LINES,
+                                         ratio=0.5)
         self.stream = pyte.Stream(self.screen)
 
     def feed(self, text: str) -> None:
@@ -65,69 +72,68 @@ class TerminalEmulator:
     def size(self) -> tuple[int, int]:
         return self.screen.lines, self.screen.columns
 
+    def _rich_row(self, buf) -> Text:
+        line = Text()
+        run, run_style = [], None
+        for col in range(self.screen.columns):
+            ch = buf[col]
+            style = _style(ch.fg, ch.bg, ch.bold, ch.italics, ch.underscore,
+                           ch.reverse)
+            if style != run_style and run:
+                line.append("".join(run), run_style)
+                run = []
+            run_style = style
+            run.append(ch.data)
+        if run:
+            line.append("".join(run), run_style)
+        line.rstrip()
+        return line
+
     def plain_lines(self) -> list[str]:
-        """Current screen as plain text (tests + fallbacks)."""
+        """Visible screen as plain text (tests + fallbacks)."""
         return [line.rstrip() for line in self.screen.display]
 
     def rich_lines(self) -> list[Text]:
-        """Current screen with colors/attributes, one Text per row."""
-        out = []
-        for row in range(self.screen.lines):
-            line = Text()
-            buf = self.screen.buffer[row]
-            run, run_style = [], None
-            for col in range(self.screen.columns):
-                ch = buf[col]
-                style = _style(ch.fg, ch.bg, ch.bold, ch.italics, ch.underscore,
-                               ch.reverse)
-                if style != run_style and run:
-                    line.append("".join(run), run_style)
-                    run = []
-                run_style = style
-                run.append(ch.data)
-            if run:
-                line.append("".join(run), run_style)
-            line.rstrip()
-            out.append(line)
+        """Visible screen with colors/attributes, one Text per row."""
+        return [self._rich_row(self.screen.buffer[row])
+                for row in range(self.screen.lines)]
+
+    def rich_full(self) -> list[Text]:
+        """Scrollback + visible screen — what the scrollable pane renders."""
+        out = [self._rich_row(row) for row in self.screen.history.top]
+        out += self.rich_lines()
+        while out and not out[-1].plain.strip():
+            out.pop()
         return out
+
+    def plain_full(self) -> list[str]:
+        return [t.plain for t in self.rich_full()]
 
 
 class TerminalView(Widget, can_focus=False):
-    """Renders a TerminalEmulator; the app feeds it output and points it at the
-    selected session's emulator. Resizes propagate to the daemon so the PTY winsize
-    matches the pane (the CLI then repaints to fit)."""
+    """Renders a TerminalEmulator's scrollback + live screen. Lives inside a
+    scrollable container (height: auto), so the operator can wheel back through
+    the whole transcript; the app keeps it anchored to the bottom while streaming
+    and propagates the *viewport* size to the daemon's PTY."""
 
     DEFAULT_CSS = """
-    TerminalView { height: 1fr; border: solid $primary; }
+    TerminalView { height: auto; }
     """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.emulator: TerminalEmulator | None = None
-        self.on_pty_resize = None   # callback(rows, cols), set by the app
 
     def attach(self, emulator: TerminalEmulator) -> None:
         self.emulator = emulator
-        self._sync_size()
-        self.refresh()
-
-    def feed(self, text: str) -> None:
-        if self.emulator is not None:
-            self.emulator.feed(text)
-            self.refresh()
-
-    def _sync_size(self) -> None:
-        area = self.content_size
-        if self.emulator is not None and area.height > 2 and area.width > 10:
-            self.emulator.resize(area.height, area.width)
-            if self.on_pty_resize is not None:
-                self.on_pty_resize(area.height, area.width)
-
-    def on_resize(self, event) -> None:
-        self._sync_size()
-        self.refresh()
+        self.refresh(layout=True)
 
     def render(self):
         if self.emulator is None:
             return Text("no session selected — dispatch a task or spawn a session")
-        return Text("\n").join(self.emulator.rich_lines())
+        return Text("\n").join(self.emulator.rich_full())
+
+    def get_content_height(self, container, viewport, width) -> int:
+        if self.emulator is None:
+            return 1
+        return max(1, len(self.emulator.rich_full()))

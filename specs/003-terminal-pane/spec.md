@@ -30,8 +30,26 @@ maintain a screen grid, apply the escape codes, render the *current* screen.
 - **C4:** colors/bold survive into the rendered pane (pyte→rich mapping incl. the
   ANSI brown→yellow slot and 256-color hex).
 
+## Rev 2 (2026-07-29, after dogfooding v0.3.2)
+
+Two causes of the remaining breakage, both fixed:
+- **Width-mismatch interleave**: PTYs spawned at the config default (120×40); the
+  cockpit then resized them to the pane. Full-screen CLIs only repaint their live
+  region — transcript already scrolled out stays laid out for the old width, so old-
+  and new-width content interleaved into garbage. Now the cockpit reports its pane
+  size (`winsize` frame), the daemon remembers it, and **new PTYs spawn at the pane
+  size** — no mismatch to interleave. (**C6**)
+- **No scrollback**: the pane kept only the visible grid; scrolled-off transcript was
+  lost and the pane couldn't scroll. Now pyte `HistoryScreen` keeps 5000 lines of
+  scrollback rendered in a scrollable container, anchored to the live bottom unless
+  the operator scrolls up. (**C5**)
+- Cosmetic: the quota gauge rendered the pending read surface as
+  "claude: unavailable", reading like a dead worker; now a dash + one explanatory
+  note (ADR-0005).
+
 ## Non-goals (registered)
 
 Raw keystroke forwarding (arrows/Ctrl straight into the PTY — takeover input remains
-line-based; full key passthrough is a follow-up), scrollback history in the pane
-(transcripts hold full history).
+line-based; full key passthrough is a follow-up); reflow of *existing* scrollback on
+pane resize after spawn (real terminals reflow, pyte doesn't — new output is laid out
+correctly, old lines keep their original width).

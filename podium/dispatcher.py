@@ -41,6 +41,7 @@ class Dispatcher:
         self.default_worker = default_worker
         self.running: dict[str, asyncio.Task] = {}   # task_id → runner
         self._linked: set[str] = set()               # sessions with resume_key stored
+        self.winsize = None                          # () -> (rows, cols) | None
 
     # --- dispatch -----------------------------------------------------------
 
@@ -95,7 +96,10 @@ class Dispatcher:
             self.work.update_task(task_id, actor="system", worktree=wt)
             prompt = self._prompt(task)
             self.work.set_status(task_id, "running", data={"worker": worker})
-            sess = await self.manager.spawn(worker, prompt, cwd=wt, task_id=task_id)
+            ws = self.winsize() if self.winsize else None
+            sess = await self.manager.spawn(worker, prompt, cwd=wt, task_id=task_id,
+                                            rows=ws[0] if ws else None,
+                                            cols=ws[1] if ws else None)
             scan_q = self.sink.subscribe()
             hook_offset = 0
             try:

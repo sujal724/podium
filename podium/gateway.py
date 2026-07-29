@@ -47,6 +47,8 @@ class Daemon:
         self.interaction = InteractionLayer(self.sink)
         self.updater = SelfUpdater(self.sink, restart_fn=self._restart_for_update)
         self._server = None
+        self.last_winsize: tuple[int, int] | None = None
+        self.dispatcher.winsize = lambda: self.last_winsize
         self.transcripts = Path(workdir or CONFIG.workdir).expanduser() / "transcripts"
         self.transcripts.mkdir(parents=True, exist_ok=True)
         self.sink.tap(self._persist)
@@ -140,7 +142,12 @@ class Daemon:
         await self.manager.stop(f["session_id"])
 
     async def on_resize(self, f: dict) -> None:
+        self.last_winsize = (int(f["rows"]), int(f["cols"]))
         self.manager.resize(f["session_id"], int(f["rows"]), int(f["cols"]))
+
+    async def on_winsize(self, f: dict) -> None:
+        """Cockpit pane size, remembered so future PTYs spawn at it (spec 003 rev 2)."""
+        self.last_winsize = (int(f["rows"]), int(f["cols"]))
 
     async def on_list(self, f: dict) -> dict:
         return {"type": "sessions", "sessions": self.manager.list()}

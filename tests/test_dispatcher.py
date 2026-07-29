@@ -131,6 +131,22 @@ async def test_hook_capture_stores_resume_key(rig, tmp_path):
         await disp.manager.stop(s)
 
 
+async def test_spawn_uses_cockpit_winsize(rig):
+    """C6 (spec 003 rev 2): new PTYs spawn at the cockpit's pane size, so the CLI
+    never paints for a width the pane doesn't have."""
+    disp, work, proj, repo = rig
+    disp.winsize = lambda: (33, 155)
+    t = work.create_task(proj, "[[ask]] [[nocommit]] sized", status="ready")
+    await disp.run_task(t)
+    async with asyncio.timeout(15):
+        while not disp.manager.sessions:
+            await asyncio.sleep(0.05)
+    sess = next(iter(disp.manager.sessions.values()))
+    assert (sess._rows, sess._cols) == (33, 155)
+    await disp.interrupt_all()
+    await disp.manager.stop(sess.id)
+
+
 async def test_resume_interrupted(rig):
     disp, work, proj, repo = rig
     t = work.create_task(proj, "was running", status="ready")
