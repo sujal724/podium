@@ -327,6 +327,12 @@ class Daemon:
             except Exception as e:
                 log.warning("update check failed: %s", e)
 
+    async def on_agents_tree(self, f: dict) -> dict:
+        """Everything Podium knows is working on a task: its session(s), their
+        native subagents, and any peer-harness attempt (spec 007)."""
+        return {"type": "agents.tree", "task_id": f["task_id"],
+                "agents": self.dispatcher.agents.tree(f["task_id"])}
+
     # quota + surfaces
     async def on_quota_query(self, f: dict) -> dict:
         return {"type": "quota.snapshot",

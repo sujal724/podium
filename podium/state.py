@@ -62,6 +62,15 @@ CREATE TABLE IF NOT EXISTS tms_links(native_id TEXT, adapter TEXT, external_id T
     source_of_truth TEXT, synced_at INT);
 CREATE TABLE IF NOT EXISTS resources(id TEXT PRIMARY KEY, task_id TEXT, url TEXT,
     path TEXT, kind TEXT, status TEXT, ingested_at INT);
+-- agent tree (spec 007): every actor Podium knows about, in one hierarchy —
+-- worker sessions, their native subagents, and peer-harness invocations.
+CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, task_id TEXT, session_id TEXT,
+    parent_id TEXT,            -- another agents.id (subagent of / spawned by)
+    kind TEXT,                 -- "session" | "subagent" | "peer"
+    worker TEXT, label TEXT, detail TEXT,
+    status TEXT,               -- running | done | blocked | error
+    started_at INT, ended_at INT, data JSON);
+CREATE INDEX IF NOT EXISTS agents_task ON agents(task_id);
 -- quota (LLD §8.3)
 CREATE TABLE IF NOT EXISTS quota_ledger(id INTEGER PRIMARY KEY, worker TEXT, window TEXT,
     spent REAL, budget REAL, window_start INT, window_reset INT, ts INT);

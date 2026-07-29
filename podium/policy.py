@@ -38,22 +38,55 @@ def write_peer_shims(worktree: str) -> Path:
     """
     bin_dir = Path(worktree) / ".podium" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
+    log = peer_log_path(worktree)
     for name in PEER_BINARIES:
         shim = bin_dir / name
+        # Report first, refuse second: Podium sees every peer attempt (with the
+        # command and which session made it) even in bypass mode, where no
+        # permission machinery is consulted at all.
         shim.write_text(
             "#!/bin/sh\n"
+            f'printf \'{{"binary":"{name}","session":"%s","task":"%s",'
+            '"command":"%s","outcome":"blocked"}\\n\' '
+            '"$PODIUM_SESSION_ID" "$PODIUM_TASK_ID" '
+            f'"{name} $(echo \\"$@\\" | tr -d \'\\\\\\\\"\')" '
+            f">> {json.dumps(str(log))} 2>/dev/null\n"
             f'echo "Blocked by Podium policy: this session may not invoke \'{name}\'."'
             " >&2\n"
-            'echo "Direct harness-to-harness calls are denied in every autonomy mode'
-            ' (decision 50); the orchestrator brokers peer calls when that surface'
-            ' ships." >&2\n'
+            'echo "The attempt is recorded in Podium\'s agent tree. Direct'
+            ' harness-to-harness calls are denied in every autonomy mode (decision'
+            ' 50); the orchestrator brokers peer calls when that surface ships." >&2\n'
             "exit 126\n"
         )
         shim.chmod(0o755)
     return bin_dir
 
 
-def worker_env(worktree: str, base: dict[str, str] | None = None) -> dict[str, str]:
+def peer_log_path(worktree: str) -> Path:
+    return Path(worktree) / ".podium" / "peer.jsonl"
+
+
+def read_peer_events(worktree: str, offset: int = 0) -> tuple[list[dict], int]:
+    """Peer-invocation attempts reported by the shims since `offset`."""
+    path = peer_log_path(worktree)
+    if not path.exists():
+        return [], offset
+    events = []
+    with path.open("rb") as f:
+        f.seek(offset)
+        data = f.read()
+        new_offset = f.tell()
+    for line in data.splitlines():
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events, new_offset
+
+
+def worker_env(worktree: str, base: dict[str, str] | None = None,
+               session_id: str | None = None,
+               task_id: str | None = None) -> dict[str, str]:
     """Environment for a worker session: peer shims first on PATH, API keys stripped
     (subscription auth only), and inherited child-session markers removed — those
     silently disable the CLI's transcript saving, which breaks session visibility
@@ -66,6 +99,9 @@ def worker_env(worktree: str, base: dict[str, str] | None = None) -> dict[str, s
                 "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY",
                 "GOOGLE_API_KEY", "CLAUDECODE"):
             env.pop(key, None)
+    # Provenance the shims stamp onto any peer attempt (spec 007).
+    env["PODIUM_SESSION_ID"] = session_id or ""
+    env["PODIUM_TASK_ID"] = task_id or ""
     return env
 
 

@@ -58,4 +58,4 @@ class ClaudeWorker(Worker):
         if prompt:
             argv.append(prompt)
         return PtySession(sid, self.name, cwd, sink, argv,
-                          env=policy.worker_env(cwd))
+                          env=policy.worker_env(cwd, session_id=sid))

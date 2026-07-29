@@ -13,6 +13,7 @@ over the DAG is a Stage C surface.
 import asyncio
 
 from podium import policy, protocol
+from podium.agents import AgentTree
 from podium.config import CONFIG
 from podium.manager import SessionManager
 from podium.metering import Meter
@@ -42,6 +43,7 @@ class Dispatcher:
         self.running: dict[str, asyncio.Task] = {}   # task_id → runner
         self._linked: set[str] = set()               # sessions with resume_key stored
         self.winsize = None                          # () -> (rows, cols) | None
+        self.agents = AgentTree(state, sink)         # spec 007: who is working
 
     # --- dispatch -----------------------------------------------------------
 
@@ -110,13 +112,17 @@ class Dispatcher:
             self.sink.emit(protocol.narration(
                 task_id, f"[{sess.id}] {worker} · mode: {autonomy} "
                          f"({policy.AUTONOMY_MODES.get(autonomy, '')})"))
+            self.agents.open_session(sess.id, task_id, worker,
+                                     detail=task.title,
+                                     data={"autonomy": autonomy, "cwd": wt})
             scan_q = self.sink.subscribe()
-            hook_offset = 0
+            hook_offset = peer_offset = 0
             try:
                 waiter = asyncio.create_task(sess.wait())
                 while not waiter.done():
                     hook_offset = self._ingest_hooks(wt, sess.id, hook_offset,
                                                      repo_root=proj["repo_root"])
+                    peer_offset = self._ingest_peers(wt, sess.id, peer_offset)
                     try:
                         frame = await asyncio.wait_for(scan_q.get(), timeout=HOOK_POLL_S)
                     except TimeoutError:
@@ -129,6 +135,9 @@ class Dispatcher:
                 self.sink.unsubscribe(scan_q)
                 self._ingest_hooks(wt, sess.id, hook_offset,
                                    repo_root=proj["repo_root"])
+                self._ingest_peers(wt, sess.id, peer_offset)
+                self.agents.close_session(
+                    sess.id, "done" if sess.exit_code == 0 else "error")
             self.manager.mark_ended(sess.id)
             self.meter.record_session(sess.id, task_id, worker, sess.kind,
                                       started, now(),
@@ -188,9 +197,29 @@ class Dispatcher:
             tool = ev.get("tool_name", "")
             self.sink.emit(protocol.narration(
                 None, f"[{session_id}] {name}{f' {tool}' if tool else ''}"))
+            # subagent lifecycle → the agent tree (spec 007)
+            if name == "PreToolUse" and tool == "Task":
+                ti = ev.get("tool_input") or {}
+                self.agents.open_subagent(
+                    session_id,
+                    ti.get("subagent_type") or ti.get("description") or "subagent",
+                    (ti.get("description") or ti.get("prompt") or "")[:300],
+                    data={"tool_input": ti})
+            elif name == "SubagentStop":
+                self.agents.close_latest(session_id, "subagent", "done")
             claude_sid = ev.get("session_id")
             if claude_sid and session_id not in self._linked:
                 self._link_claude_session(session_id, claude_sid, worktree, repo_root)
+        return new_offset
+
+    def _ingest_peers(self, worktree: str, session_id: str, offset: int) -> int:
+        """Peer-harness attempts reported by the PATH shims — recorded whatever the
+        autonomy mode, so bypass can never make one invisible (spec 007)."""
+        events, new_offset = policy.read_peer_events(worktree, offset)
+        for ev in events:
+            self.agents.record_peer(
+                ev.get("session") or session_id, ev.get("binary", "?"),
+                ev.get("command", ""), ev.get("outcome", "blocked"))
         return new_offset
 
     def _link_claude_session(self, session_id: str, claude_sid: str,

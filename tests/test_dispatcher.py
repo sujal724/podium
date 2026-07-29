@@ -193,3 +193,43 @@ async def test_autonomy_resolution_order(rig):
     assert disp.autonomy_for(work.get_task(t), {"autonomy": "autonomous"}) == "supervised"
     work.update_task(t, autonomy="nonsense")
     assert disp.autonomy_for(work.get_task(t), {"autonomy": "bogus"}) == "supervised"
+
+
+async def test_agent_tree_records_sessions_subagents_and_peers(rig):
+    """Spec 007: for a task, Podium can show every actor — the session it spawned,
+    the subagents that session spawned, and any peer-harness attempt (which bypass
+    mode cannot hide, because the shim reports before refusing)."""
+    disp, work, proj, repo = rig
+    t = work.create_task(proj, "[[ask]] [[nocommit]] tree", status="ready")
+    await disp.run_task(t)
+    async with asyncio.timeout(15):
+        while not disp.manager.sessions:
+            await asyncio.sleep(0.05)
+    sid = next(iter(disp.manager.sessions))
+    wt = work.get_task(t).worktree
+    pdir = Path(wt) / ".podium"
+    pdir.mkdir(exist_ok=True)
+    (pdir / "hooks.jsonl").write_text(
+        '{"hook_event_name":"PreToolUse","tool_name":"Task","session_id":"c-1",'
+        '"tool_input":{"subagent_type":"explorer","description":"map the repo"}}\n'
+        '{"hook_event_name":"SubagentStop","session_id":"c-1"}\n')
+    (pdir / "peer.jsonl").write_text(
+        '{"binary":"gemini","session":"%s","command":"gemini -p hi",'
+        '"outcome":"blocked"}\n' % sid)
+    async with asyncio.timeout(10):
+        while True:
+            kinds = [a["kind"] for a in disp.agents.tree(t)]
+            if {"session", "subagent", "peer"} <= set(kinds):
+                break
+            await asyncio.sleep(0.1)
+    tree = disp.agents.tree(t)
+    session_node = next(a for a in tree if a["kind"] == "session")
+    subagent = next(a for a in tree if a["kind"] == "subagent")
+    peer = next(a for a in tree if a["kind"] == "peer")
+    assert subagent["parent_id"] == session_node["id"] and subagent["depth"] == 1
+    assert subagent["label"] == "explorer" and subagent["status"] == "done"
+    assert peer["parent_id"] == session_node["id"]      # attributed to its spawner
+    assert peer["status"] == "blocked" and "gemini -p hi" in peer["detail"]
+    await disp.interrupt_all()
+    for s in list(disp.manager.sessions):
+        await disp.manager.stop(s)

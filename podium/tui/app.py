@@ -166,6 +166,8 @@ class Cockpit(App):
                                                 "session (Enter sends)", id="takeover")
                     with TabPane("review", id="tab-review"):
                         yield RichLog(id="review-log", highlight=True, wrap=False)
+                    with TabPane("agents", id="tab-agents"):
+                        yield RichLog(id="agents-log", wrap=True)
                     with TabPane("inbox", id="tab-inbox"):
                         yield RichLog(id="inbox-log", wrap=True)
                     with TabPane("feed", id="tab-feed"):
@@ -284,6 +286,15 @@ class Cockpit(App):
             log.write(f"task {f['task_id']} on {f['branch']} — a=approve r=reject\n")
             log.write(Text(f["diff"]))
             feed.write(f"review ready: {f['task_id']}")
+        elif t in ("agents.tree", "agents.updated"):
+            log = self.query_one("#agents-log", RichLog)
+            log.clear()
+            log.write(f"agents for task {f['task_id']}:")
+            for a in f.get("agents", []):
+                mark = {"session": "◆", "subagent": "├─◇", "peer": "⚠"}.get(
+                    a["kind"], "·")
+                log.write(f"{'  ' * a['depth']}{mark} {a['label']} "
+                          f"[{a['status']}] {a['kind']} {(a.get('detail') or '')[:60]}")
         elif t == "task.inbox":
             log = self.query_one("#inbox-log", RichLog)
             log.clear()

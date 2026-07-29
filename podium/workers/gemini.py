@@ -39,6 +39,6 @@ class GeminiWorker(Worker):
         # preamble (policy.PREAMBLE_DENY, prepended by the dispatcher) — recorded
         # increment, see surfaces.py `peer.deny`.
         # peer shims on PATH enforce the deny at OS level for this adapter too
-        env = policy.worker_env(cwd)
+        env = policy.worker_env(cwd, session_id=sid)
         argv = ["gemini"] + (["-i", prompt] if prompt else [])
         return PtySession(sid, self.name, cwd, sink, argv, env=env)
