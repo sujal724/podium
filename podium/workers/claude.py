@@ -10,8 +10,10 @@ import os
 from pathlib import Path
 
 from podium import policy
+from podium.config import CONFIG
 from podium.sessions.base import Session
 from podium.sessions.pty import PtySession
+from podium.sessions.tmux import TmuxSession, available as tmux_available
 from podium.sink import Sink
 from podium.workers.base import Availability, Worker, register
 
@@ -57,5 +59,8 @@ class ClaudeWorker(Worker):
             argv += ["--resume", resume_key]
         if prompt:
             argv.append(prompt)
-        return PtySession(sid, self.name, cwd, sink, argv,
-                          env=policy.worker_env(cwd, session_id=sid))
+        env = policy.worker_env(cwd, session_id=sid)
+        if CONFIG.term_backend == "tmux" or (
+                CONFIG.term_backend == "auto" and tmux_available()):
+            return TmuxSession(sid, self.name, cwd, sink, argv, env=env)
+        return PtySession(sid, self.name, cwd, sink, argv, env=env)

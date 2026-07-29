@@ -4,6 +4,8 @@
 import asyncio
 import sys
 
+import pytest
+
 from podium.ids import new_id
 from podium.sessions.pty import PtySession
 from podium.sink import Sink
@@ -68,3 +70,34 @@ async def test_exec_failure_is_error_status(tmp_path):
     await sess.start()
     assert await sess.wait() == 127
     assert sess.status == "error"
+
+
+def test_tmux_backend_selection_and_honest_fallback(monkeypatch, tmp_path):
+    """I4 (spec 010): tmux is used for real terminal panes when available; when it
+    isn't, Podium says so plainly and the emulated pane remains — never a fake."""
+    import podium.workers.claude as cw
+    from podium.sessions.tmux import TmuxSession
+    from podium.sessions.pty import PtySession
+
+    monkeypatch.setattr(cw.CONFIG, "term_backend", "auto")
+    monkeypatch.setattr(cw, "tmux_available", lambda: True)
+    sess = cw.ClaudeWorker().make_session("s_t", Sink(), str(tmp_path), "go")
+    assert isinstance(sess, TmuxSession) and sess.kind == "tmux"
+    assert sess.attach_command() == ["tmux", "attach", "-t", "podium-s_t"]
+
+    monkeypatch.setattr(cw, "tmux_available", lambda: False)
+    sess = cw.ClaudeWorker().make_session("s_p", Sink(), str(tmp_path), "go")
+    assert isinstance(sess, PtySession) and sess.kind == "pty"
+
+    monkeypatch.setattr(cw.CONFIG, "term_backend", "pty")
+    monkeypatch.setattr(cw, "tmux_available", lambda: True)
+    assert isinstance(cw.ClaudeWorker().make_session("s_f", Sink(), str(tmp_path),
+                                                     "go"), PtySession)
+
+
+async def test_tmux_session_reports_missing_tmux(tmp_path, monkeypatch):
+    from podium.sessions import tmux as tmod
+    monkeypatch.setattr(tmod, "available", lambda: False)
+    sess = tmod.TmuxSession("s_x", "claude", str(tmp_path), Sink(), ["claude"])
+    with pytest.raises(tmod.TmuxUnavailable, match="not installed"):
+        await sess.start()
