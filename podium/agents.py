@@ -152,12 +152,27 @@ class AgentTree:
             for proj in projects_by_ws.get(ws["id"], []):
                 out.append({"kind": "project", "id": proj["id"],
                             "label": proj["name"], "status": "", "depth": 1})
+                # subtasks nest arbitrarily deep: walk the parent chain
+                by_parent: dict[str | None, list] = {}
                 for task in tasks_by_project.get(proj["id"], []):
-                    out.append({"kind": "task", "id": task["id"],
-                                "label": task["title"], "status": task["status"],
-                                "depth": 2})
-                    for node in self.tree(task["id"]):
-                        out.append(node | {"depth": node["depth"] + 3})
+                    by_parent.setdefault(task["parent_id"], []).append(task)
+                seen: set[str] = set()
+
+                def walk_tasks(parent, depth):
+                    for task in by_parent.get(parent, []):
+                        if task["id"] in seen:
+                            continue
+                        seen.add(task["id"])
+                        out.append({"kind": "task", "id": task["id"],
+                                    "label": task["title"],
+                                    "status": task["status"], "depth": depth})
+                        for node in self.tree(task["id"]):
+                            out.append(node | {"depth": node["depth"] + depth + 1})
+                        walk_tasks(task["id"], depth + 1)
+
+                walk_tasks(None, 2)
+                for orphan_parent in list(by_parent):
+                    walk_tasks(orphan_parent, 2)   # parent outside this project
         return out
 
     def _session_node(self, session_id: str):

@@ -51,3 +51,19 @@ worktree. Approving no longer depends on where the operator's own checkout sits
   parent's work; approving a child lands it in the parent branch, leaving the project
   base untouched.
 - **G4** approve works regardless of the operator checkout's current branch.
+
+## Depth (operator question, 2026-07-29)
+
+Subtasks nest **arbitrarily deep** — sub-sub-subtasks and beyond. Base resolution
+recurses the parent chain, so `main → task/A → task/B → task/B1 → task/B1a → …` all
+stack, each level diffing and merging against the level above.
+
+Three things depth touches, all covered:
+- **The merge guard is recursive**: a task refuses to merge while *any descendant*
+  (not just a direct child) is unfinished — a discarded or skipped middle level can no
+  longer let a deep grandchild be orphaned. **G5**
+- **The hierarchy must stay a tree**: re-parenting is cycle-checked (a task cannot
+  become its own ancestor), because a cycle would make base resolution recurse forever.
+  **G5**
+- **The tree view nests**: `podium tree` indents subtasks under their parents at any
+  depth, with each task's sessions/subagents/peers under it. **G6**

@@ -298,8 +298,11 @@ class Dispatcher:
         # parent cannot land while any child is unfinished (spec 008). This is also
         # the work model: a parent is its decomposition; it is done when its parts are.
         unfinished = [r["id"] for r in self.state.query(
-            "SELECT id FROM tasks WHERE parent_id=? AND status NOT IN"
-            " ('done','discarded')", (task_id,))]
+            "WITH RECURSIVE kids(id) AS ("
+            "  SELECT id FROM tasks WHERE parent_id=:root"
+            "  UNION ALL SELECT t.id FROM tasks t JOIN kids k ON t.parent_id=k.id)"
+            " SELECT k.id FROM kids k JOIN tasks t ON t.id=k.id"
+            " WHERE t.status NOT IN ('done','discarded')", {"root": task_id})]
         if unfinished:
             raise DispatchError(
                 f"task {task_id} has unfinished subtasks ({', '.join(unfinished)}); "

@@ -303,3 +303,43 @@ async def test_subtask_branches_off_parent_branch(rig):
     work.update_task(grandchild, base_ref="release/2.0")
     assert disp.base_ref_for(work.get_task(grandchild),
                              disp._project(work.get_task(grandchild))) == "release/2.0"
+
+
+async def test_arbitrary_depth_subtasks(rig):
+    """G5: subtasks nest arbitrarily deep — bases chain all the way down, the merge
+    guard sees DESCENDANTS (not just direct children), and the hierarchy stays a tree."""
+    from podium.work.store import CycleError
+    disp, work, proj, repo = rig
+    ids, parent = [], None
+    for i in range(5):                                   # 5 levels deep
+        parent = work.create_task(proj, f"level {i}", parent_id=parent, status="ready")
+        ids.append(parent)
+    p = disp._project(work.get_task(ids[-1]))
+    for i in range(1, 5):                                # each stacks on its parent
+        assert disp.base_ref_for(work.get_task(ids[i]), p) == f"task/{ids[i - 1]}"
+    assert disp.base_ref_for(work.get_task(ids[0]), p) == "main"
+    # the ROOT refuses to merge while a deep descendant is unfinished
+    await disp.run_task(ids[0])
+    await _await_status(work, ids[0], ("review",))
+    with pytest.raises(DispatchError, match=ids[-1]):
+        await disp.approve(ids[0])
+    for tid in ids[1:]:
+        work.set_status(tid, "done")
+    await disp.approve(ids[0])
+    assert work.get_task(ids[0]).status == "done"
+    # and the hierarchy must stay a tree
+    with pytest.raises(CycleError):
+        work.update_task(ids[0], parent_id=ids[-1])
+    with pytest.raises(CycleError):
+        work.update_task(ids[2], parent_id=ids[2])
+
+
+async def test_scope_tree_nests_subtasks(rig):
+    """G6: the whole-hierarchy view indents subtasks under their parents."""
+    disp, work, proj, repo = rig
+    a = work.create_task(proj, "A", status="ready")
+    b = work.create_task(proj, "B", parent_id=a, status="ready")
+    work.create_task(proj, "B1", parent_id=b, status="ready")
+    depths = {n["label"]: n["depth"] for n in disp.agents.scope_tree(work)
+              if n["kind"] == "task"}
+    assert depths["A"] == 2 and depths["B"] == 3 and depths["B1"] == 4
