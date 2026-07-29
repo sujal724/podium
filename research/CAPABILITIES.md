@@ -337,3 +337,83 @@ ACP + import quota-state surfaces"; M6's Quota Scheduler gains the multi-regime 
 no-credits guard for Codex; M8's teams layer is re-founded on "native teams as composite workers".
 The four unique pillars and the intelligence track are untouched — they were already aimed at the
 empty ground, and this inventory confirms the ground is still empty.
+
+## 10. Peer harness calls — cross-vendor at any level (proposed decision 50, operator ruling 2026-07-29)
+
+**Operator requirement (2026-07-29):** cross-vendor mixing and routing may happen **at any level** —
+not only Podium assigning top-level workers, but a *running* harness session calling on another
+vendor's harness mid-task when one is available and needed (e.g., a Claude session pulling in Gemini
+for a huge-context read; Codex asking for a Claude review of its diff).
+
+**Mechanism: brokered, never direct.** Podium exposes a **`peer` tool over MCP** (the seam all three
+CLIs already speak, §1) to every worker session: `peer.request(need, constraints) → result`. The
+request expresses a **need, not a vendor choice**; it enters the **routing gate**
+(`INTELLIGENCE §6`) like any task, and the gate satisfies it with whichever expert fits — any vendor,
+an internal capability agent, or **abstain/escalate**. This extends peer routing (`INTELLIGENCE
+§6.1`) downward: peers can now *originate* requests, with the gate still in charge. Native halves the
+Registry should prefer as satisfier transports where they fit: `codex mcp-server` (Codex as a
+callable tool, §1) and Gemini **remote A2A agents**.
+
+**Direct harness→harness calls are blocked by policy** (an agent shelling out `gemini -p` from
+inside a Claude session) via the native sandbox/permission rules ×3 (§1). That naive version is
+where the operator's "will there be problems?" answer lives — each of these is real if calls bypass
+the broker, and each is closed by brokering:
+
+1. **Invisible quota burn.** A nested call drains a *different vendor's* reservoir with no
+   attribution; the Quota Scheduler (decision 20) must meter every call against the right
+   per-vendor regime (§2.2). Brokered calls are ordinary scheduled sessions — fully metered.
+2. **Routing authority conflict.** Two routers fighting — the harness's "I want Gemini" vs. our MoE
+   gate. Ruling: the inner request is a need; **the gate picks the satisfier** (which may not be the
+   vendor asked for, or any vendor at all).
+3. **Recursion/cycles.** A calls B calls A. Brokered requests carry **lineage + a call-depth cap**
+   (default depth 1; deeper is config), same validation posture as the dependency DAG (§6).
+4. **Observability holes.** Direct sub-calls bypass PTY watch/takeover, OTEL, and transcripts.
+   Brokered satisfiers are normal sessions with full live visibility.
+5. **Provenance laundering.** Peer output re-entering the caller's context must carry authorship
+   provenance (decision 39) so no agent mistakes another agent's output for ground truth.
+6. **Reward mis-attribution.** The capability matrix / bandit (decision 46) must credit the arm
+   that actually did the work; the broker records (caller, satisfier, outcome) separately.
+7. **Permission laundering.** The satisfier runs under **its own** policy for the task's
+   environment (decision 42 gates), never inheriting the caller's approvals.
+
+**Intra-vendor subagents are monitored too (operator addition 2026-07-29).** The same visibility
+requirement applies when a harness fans out *within itself* — Claude spawning Claude subagents or
+Workflows, Codex Multi-agent V2, Gemini's sequential subagents. These stay native (the delegation
+verdict of §2.2 stands) and their quota burn already lands on the caller's own reservoir, but Podium
+**observes inside the composite worker**: subagent lifecycle via native hooks (SubagentStart/Stop on
+Codex, Claude's 15+ hook set, Gemini's 11 events, §1) plus OTEL and the structured event streams feed
+a live **subagent tree** in mission-control (decision 25). Every subagent is provenance-tagged
+(decision 39; hooks report tool/session identity, §2.4) and metered, so the capability matrix
+attributes outcomes to the composite arm while the operator can still see — and intervene at — any
+level. No nested agent activity, cross-vendor or intra-vendor, is a black box.
+
+**Verdict vs harnesses: BUILD** (the broker + gate integration + subagent tree view); ingestion of
+subagent lifecycle **DELEGATEs** to native hooks/OTEL ×3, and the injection seam **DELEGATEs** to
+the native MCP clients ×3. Roadmap fit: the `peer` tool ships with the MCP intelligence seam (I-track);
+depth>1 and team-originated fan-out land with M8.
+
+## 11. Transparent operator models — visibility & the no-ceiling rule (proposed decision 51, operator ruling 2026-07-29)
+
+**Operator requirement (2026-07-29):** full visibility into "what the system thinks about me," and a
+guarantee that a low estimate can never limit the operator's learning — the operator can raise their
+effort at any time, and the system must respond to that, not to a stale label.
+
+- **Inspectable.** A **"what the system believes about me" panel** (TUI first, per decision 18):
+  every learner-model estimate (knowledge tracing, `INTELLIGENCE §11`) and user-state reading is
+  visible, each with its **evidence** — which first-party signals produced it (provenance,
+  decision 39). No hidden scores anywhere in the system.
+- **Editable, pinnable, resettable.** The operator can correct, pin, or wipe any estimate; operator
+  edits are **authoritative** (the same authority pattern as dependency edges, §6: the system
+  proposes, the human rules).
+- **The no-ceiling rule.** Model estimates **sequence and scaffold — they never gate.** A low
+  estimate *expands support* (more introductory steps offered on the learning path); it never
+  hides, locks, or withholds material, tasks, or ambition. Every learning path is skippable and
+  overridable — an **effort override** ("show me the expert path anyway") is always one action
+  away, and taking it is itself first-party signal: demonstrated effort raises estimates. The
+  models exist to serve the operator's stated ambition, not to cap it.
+- **Scope.** Extends decision 38's "human-controlled, transparent, not surveillance" from the
+  user-state model to **all** operator-modeling (learner model included), consistent with additive
+  evolution (§7) and the human-variance principle (decision 36).
+
+**Verdict vs harnesses: BUILD** — no harness models the operator at all (§2.3); transparency
+surfaces ride the existing TUI/mission-control planes (decisions 18, 25).

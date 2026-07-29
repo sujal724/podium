@@ -560,6 +560,23 @@ I1 lands around M3–M5; the Autonomy Controller in M6 leans on I3's verifier).
     history, and reconciliation against the read numbers — not as a substitute for them. If a
     read surface breaks, the gauge says **`unavailable`** (decision 44: never fake) until the
     Updater/Watcher re-probes.
+50. **Peer harness calls — cross-vendor at any level, always brokered** (operator ruling,
+    2026-07-29). A running worker session may call on another vendor's harness when available and
+    needed, via a Podium **`peer` MCP tool** that expresses a **need, not a vendor choice**; every
+    peer request goes through the routing gate — metered by the Quota Scheduler, provenance-tagged
+    (decision 39), depth-capped — and **direct harness→harness calls are blocked by policy**.
+    Intra-vendor fan-out (a harness's own native subagents) is likewise **monitored**: native
+    hooks/OTEL feed a live subagent tree in mission-control (decision 25); no nested agent
+    activity, cross-vendor or intra-vendor, is a black box. Long form + risk analysis in
+    `CAPABILITIES.md §10`.
+51. **Transparent operator models — visibility & the no-ceiling rule** (operator ruling,
+    2026-07-29). Everything the system believes about the operator — learner-model estimates
+    (decision 33) and user-state readings (decision 38) — is **inspectable with its evidence,
+    editable, pinnable, and resettable**; operator edits are authoritative. Estimates **sequence
+    and scaffold, never gate**: a low estimate expands support and never hides, locks, or
+    withholds material, tasks, or ambition; an **effort override** ("show me the expert path
+    anyway") is always one action away and is itself first-party learning signal. Long form in
+    `CAPABILITIES.md §11`.
 
 ---
 
