@@ -89,6 +89,7 @@ class Cockpit(App):
         self.selected_task: str | None = None
         self.review_task: str | None = None
         self.session_info: dict[str, dict] = {}
+        self.review_queue: list[str] = []
 
     def _update_session_bar(self) -> None:
         """The operator must always know which session they're watching and what
@@ -175,6 +176,7 @@ class Cockpit(App):
         await self._send({"type": "work.list"})
         await self._send({"type": "quota.query"})
         await self._send({"type": "task.inbox"})
+        await self._send({"type": "review.queue"})
         async for raw in self.ws:
             try:
                 self._on_frame(protocol.loads(raw))
@@ -244,7 +246,24 @@ class Cockpit(App):
             self._render_board(f)
         elif t == "task.updated":
             asyncio.create_task(self._send({"type": "work.list"}))
+            if f["task"]["status"] in ("review", "done", "blocked"):
+                asyncio.create_task(self._send({"type": "review.queue"}))
             feed.write(f"task {f['task']['id']} → {f['task']['status']}")
+        elif t == "review.snapshot":
+            log = self.query_one("#review-log", RichLog)
+            log.clear()
+            self.review_queue = [x["id"] for x in f["tasks"]]
+            if not f["tasks"]:
+                log.write("nothing awaiting review")
+            for x in f["tasks"]:
+                log.write(f"[b]{x['id']}[/b]  P{x['priority']}  {x['title']}")
+                log.write(f"    approve merges {x['branch']} → {x['merge_target']}")
+            if f["tasks"]:
+                log.write("")
+                log.write("select a task on the board to load its diff · "
+                          "ctrl+a approve · ctrl+r reject")
+                self.review_task = self.review_task or f["tasks"][0]["id"]
+                feed.write(f"{len(f['tasks'])} task(s) awaiting review")
         elif t == "review.ready":
             self.review_task = f["task_id"]
             log = self.query_one("#review-log", RichLog)
@@ -360,6 +379,11 @@ class Cockpit(App):
                 {"type": "task.detail", "task_id": event.node.data}))
             asyncio.create_task(self._send(
                 {"type": "agents.tree", "task_id": event.node.data}))
+            # if it is awaiting review, load its diff so ctrl+a/ctrl+r act on it
+            if event.node.data in getattr(self, "review_queue", []):
+                self.review_task = event.node.data
+                asyncio.create_task(self._send(
+                    {"type": "review.diff", "task_id": event.node.data}))
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "takeover" and self.selected_session:
