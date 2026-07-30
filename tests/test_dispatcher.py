@@ -391,3 +391,46 @@ def test_peer_shim_depth_cap(tmp_path, monkeypatch):
     assert peer_shim.main(["shim", "claude", "-p", "hi"]) == 126
     line = json.loads((tmp_path / ".podium" / "peer.jsonl").read_text().strip())
     assert line["outcome"] == "blocked" and "depth cap" in line["reason"]
+
+
+async def test_adopt_live_session_instead_of_requeuing(rig, monkeypatch):
+    """Spec 011: workers run in tmux and OUTLIVE the daemon. On boot the daemon must
+    adopt a surviving worker — re-queuing would start a second worker on the same
+    task while the first kept running."""
+    disp, work, proj, repo = rig
+    t = work.create_task(proj, "survivor", status="ready")
+    claimed = work.claim("mock", t)
+    work.set_status(claimed.id, "running")
+    disp.state.execute(
+        "INSERT INTO sessions(id,task_id,worker,kind,cwd,status,created_at)"
+        " VALUES('s_live',?,'mock','tmux',?,'running',1)", (t, str(repo)))
+
+    adopted_calls = []
+
+    class FakeTmux:
+        def __init__(self, sid, label, cwd, sink, argv):
+            self.id, self.label, self.cwd = sid, label, cwd
+            self.kind, self.status, self.exit_code = "tmux", "running", None
+            self.task_id = None
+        async def adopt(self):
+            adopted_calls.append(self.id)
+        async def wait(self):
+            await asyncio.sleep(3600)          # still running
+        def info(self):
+            return {"id": self.id, "label": self.label, "kind": self.kind,
+                    "status": self.status, "cwd": self.cwd}
+
+    import podium.sessions.tmux as tmod
+    monkeypatch.setattr(tmod, "live_sessions", lambda: {"podium-s_live"})
+    monkeypatch.setattr(tmod, "TmuxSession", FakeTmux)
+
+    assert await disp.adopt_live_sessions() == [t]
+    assert adopted_calls == ["s_live"]
+    assert work.get_task(t).status == "running"       # NOT re-queued
+    # the follow-up re-queue pass must leave the adopted task and session alone
+    assert disp.resume_interrupted() == []
+    assert work.get_task(t).status == "running"
+    row = disp.state.query("SELECT status FROM sessions WHERE id='s_live'")[0]
+    assert row["status"] == "running"
+    for task in disp.running.values():
+        task.cancel()

@@ -31,6 +31,15 @@ def available() -> bool:
     return shutil.which("tmux") is not None
 
 
+def live_sessions() -> set[str]:
+    """tmux sessions Podium owns that are still alive — workers outlive the daemon."""
+    if not available():
+        return set()
+    out = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                         capture_output=True, text=True).stdout
+    return {n for n in out.split() if n.startswith("podium-")}
+
+
 def _tmux(*args: str, check: bool = True) -> str:
     proc = subprocess.run(["tmux", *args], capture_output=True, text=True)
     if check and proc.returncode != 0:
@@ -52,6 +61,24 @@ class TmuxSession(Session):
         self._offset = 0
         self._reader: asyncio.Task | None = None
         self._exited = asyncio.Event()
+
+    async def adopt(self) -> None:
+        """Re-attach to a tmux worker that is already running (spec 011): resume
+        reading its capture from the beginning of what we have, without spawning a
+        second worker. The pane keeps running throughout — the operator never
+        notices the daemon restarted."""
+        if not self._alive():
+            raise TmuxUnavailable(f"tmux session {self.tmux_name} is gone")
+        self._capture.parent.mkdir(parents=True, exist_ok=True)
+        self._capture.touch()
+        # keep capturing into the same file (pipe-pane is per-pane, lost with the
+        # old daemon only if tmux restarted; -o is a no-op when already piping)
+        _tmux("pipe-pane", "-o", "-t", self.tmux_name,
+              f"cat >> {self._capture!s}", check=False)
+        self._offset = self._capture.stat().st_size
+        self.set_status("running")
+        self.resumed = True
+        self._reader = asyncio.create_task(self._read_loop())
 
     async def start(self, initial_input: str | None = None) -> None:
         if not available():

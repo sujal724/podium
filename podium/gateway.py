@@ -77,6 +77,15 @@ class Daemon:
         if CONFIG.autoresume:
             self.dispatcher.resume_interrupted()
 
+    async def boot_async(self) -> None:
+        """Adopt surviving tmux workers BEFORE re-queuing, so a restart never starts
+        a second worker on a task whose first one is still running (spec 011)."""
+        if CONFIG.autoresume:
+            try:
+                await self.dispatcher.adopt_live_sessions()
+            except Exception as e:
+                log.warning("adopting live sessions failed: %s", e)
+
     # --- one client connection ---------------------------------------------
 
     async def handle_client(self, ws) -> None:
@@ -361,6 +370,7 @@ class Daemon:
     # --- serve ---------------------------------------------------------------
 
     async def serve(self, host: str | None = None, port: int | None = None):
+        await self.boot_async()
         self.boot()
         self._server = await websockets.serve(
             self.handle_client,
@@ -374,11 +384,39 @@ class Daemon:
 
 async def _amain() -> None:
     daemon = Daemon()
+    loop = asyncio.get_running_loop()
+    stopping = asyncio.Event()
+
+    def _shutdown(sig: str) -> None:
+        """A clean shutdown (laptop power-off, systemd stop) must be
+        DISTINGUISHABLE from a crash: mark in-flight tasks interrupted so the next
+        boot resumes them, and leave the tmux workers alone — they survive and are
+        adopted on the next start (spec 011)."""
+        log.info("shutdown signal %s — recording interrupts", sig)
+        for task_id in list(daemon.dispatcher.running):
+            with contextlib.suppress(Exception):
+                daemon.work._log(task_id, "interrupted", "system",
+                                 {"reason": f"daemon shutdown ({sig})"})
+        with contextlib.suppress(Exception):
+            daemon.state.execute(
+                "INSERT INTO events(session_id, ts, type, data)"
+                " VALUES(NULL, strftime('%s','now'), 'daemon.shutdown', ?)",
+                (f'{{"signal": "{sig}"}}',))
+        stopping.set()
+
+    for sig in ("SIGTERM", "SIGINT", "SIGHUP"):
+        with contextlib.suppress(NotImplementedError, AttributeError):
+            loop.add_signal_handler(getattr(__import__("signal"), sig),
+                                    _shutdown, sig)
     server = await daemon.serve()
     log.info("podiumd listening on %s", CONFIG.ws_url)
     print(f"podiumd {podium.__version__} listening on {CONFIG.ws_url}")
-    await asyncio.get_running_loop().create_future()  # run forever
-    del server
+    await stopping.wait()
+    server.close()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(server.wait_closed(), timeout=5)
+    daemon.state.close()
+    print("podiumd stopped — tmux workers keep running and are adopted on restart")
 
 
 def main() -> None:
