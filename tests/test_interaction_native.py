@@ -1,4 +1,4 @@
-"""Spec 011 B-criteria: native approval callbacks surfaced as one uniform prompt.
+"""Spec 012 B-criteria: native approval callbacks surfaced as one uniform prompt.
 No quota, no network: the SDK path uses an injected fake client; the ACP path runs
 the scripted mock agent over real pipes; the wire path runs a real gateway."""
 

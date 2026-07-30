@@ -167,7 +167,7 @@ class Daemon:
         data = self.interaction.answer_bytes(qid, f["value"])
         await self.manager.write(f["session_id"], data)
 
-    # interaction layer — native approvals (Stage B, spec 011)
+    # interaction layer — native approvals (Stage B, spec 012)
     async def on_answer_native(self, f: dict) -> dict:
         self.approvals.answer(f["request_id"], f["value"],
                               actor=f.get("actor", "human"),

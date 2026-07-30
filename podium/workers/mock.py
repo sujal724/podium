@@ -1,5 +1,5 @@
 """Mock worker — a tiny scripted CLI under a real PTY (A1/A2), plus a scripted ACP
-agent (`kind="acp"`) proving the uniform approval prompt (spec 011 B-criteria) —
+agent (`kind="acp"`) proving the uniform approval prompt (spec 012 B-criteria) —
 all without spending any quota. Only registered when PODIUM_ENABLE_MOCK is set,
 so it can never be routed real work by accident."""
 

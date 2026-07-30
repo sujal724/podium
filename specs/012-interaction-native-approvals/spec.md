@@ -1,4 +1,4 @@
-# Spec 011 — Interaction layer: native approval callbacks (Stage B)
+# Spec 012 — Interaction layer: native approval callbacks (Stage B)
 
 **Status:** Approved for build (first Stage-B slice) · **Date:** 2026-07-29
 **Sources:** `research/V1.md` (Stage B, interaction row), `research/HLD.md` §7,

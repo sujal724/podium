@@ -1,6 +1,6 @@
 """Gemini worker — PTY drive from Stage A; Stage B adds `kind="acp"` (`gemini --acp`,
 JSON-RPC over stdio) with native approval callbacks + setSessionMode landing on the
-interaction layer as the uniform prompt (spec 011).
+interaction layer as the uniform prompt (spec 012).
 ToS gray: unattended use is operator opt-in (PODIUM_WORKERS_HEADLESS)."""
 
 from pathlib import Path

@@ -7,7 +7,7 @@ isolated worktree without a human at the keyboard.
 
 Stage B adds `kind="sdk"` — the Claude Agent SDK's persistent client, whose
 `can_use_tool` callback lands on the interaction layer as the uniform approval
-prompt (spec 011). The SDK package is optional: `pip install 'podium[sdk]'`.
+prompt (spec 012). The SDK package is optional: `pip install 'podium[sdk]'`.
 """
 
 import importlib.util

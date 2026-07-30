@@ -26,7 +26,7 @@ from podium import protocol
 from podium.ids import new_id
 from podium.sink import Sink
 
-# --- native approval registry (Stage B, spec 011) ------------------------------
+# --- native approval registry (Stage B, spec 012) ------------------------------
 
 # Resolution handed to a waiting callback when its session ends before an answer
 # arrives; adapters translate it into their driver's cancelled/denied outcome.
