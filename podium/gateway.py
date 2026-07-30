@@ -494,6 +494,11 @@ class Daemon:
         if port_:
             import socket
             probe = socket.socket()
+            # Probe exactly as asyncio will bind, or the check lies: without
+            # SO_REUSEADDR a lingering socket from a just-killed daemon fails the
+            # probe while the real server would bind fine — reported as a phantom
+            # "already in use" that no pkill could clear.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 probe.bind((host_, port_))
             except OSError:
