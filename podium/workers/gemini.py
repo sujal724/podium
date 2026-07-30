@@ -7,7 +7,7 @@ from pathlib import Path
 from podium import policy
 from podium.config import CONFIG
 from podium.sessions.base import Session
-from podium.sessions.pty import PtySession
+from podium.sessions.tmux import TmuxSession
 from podium.sink import Sink
 from podium.workers.base import Availability, Worker, register
 
@@ -41,4 +41,4 @@ class GeminiWorker(Worker):
         # peer shims on PATH enforce the deny at OS level for this adapter too
         env = policy.worker_env(cwd, session_id=sid)
         argv = ["gemini"] + (["-i", prompt] if prompt else [])
-        return PtySession(sid, self.name, cwd, sink, argv, env=env)
+        return TmuxSession(sid, self.name, cwd, sink, argv, env=env)

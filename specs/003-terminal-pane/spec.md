@@ -53,3 +53,23 @@ Raw keystroke forwarding (arrows/Ctrl straight into the PTY — takeover input r
 line-based; full key passthrough is a follow-up); reflow of *existing* scrollback on
 pane resize after spawn (real terminals reflow, pyte doesn't — new output is laid out
 correctly, old lines keep their original width).
+
+
+## Rev 3 (2026-07-29) — fixed viewport, and prefer the real TUI
+
+Rev 2's scrollback made the pane a *growing document* (content-tall widget rendering
+history + live screen on every chunk), so repaints visibly stacked: "the things
+rendered before stay and new things render on top". That is not how a terminal works.
+
+- The pane is a **fixed viewport** again: it renders exactly the emulator's current
+  screen, never a growing document. **C11** (200 repaints render as one screen).
+- Scrollback is **paged through that grid** with PgUp/PgDn using pyte's own
+  `prev_page`/`next_page` — the emulator's mechanism, not a second rendering path.
+
+**Emulation is a preview, not the destination.** For full fidelity Podium should hand
+the operator the worker's *real* TUI rather than re-render it: `ctrl+o` already
+suspends the cockpit and gives the terminal to the actual Claude UI for that session
+(its worktree, its conversation), returning to the cockpit on exit. The registered next
+increment is running workers inside a terminal multiplexer so an operator can attach to
+a live session at full fidelity while the daemon keeps reading the same PTY — no
+emulator in the path at all.

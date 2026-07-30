@@ -17,7 +17,7 @@ from podium.config import CONFIG
 async def _rpc(frame: dict, wait_types: tuple[str, ...] = ()) -> list[dict]:
     """Send one frame; collect the direct reply (and any wait_types frames)."""
     out = []
-    async with websockets.connect(CONFIG.ws_url) as ws:
+    async with websockets.connect(CONFIG.ws_url, max_size=16 * 1024 * 1024) as ws:
         # consume hello + snapshot
         await ws.recv()
         await ws.recv()
@@ -110,7 +110,7 @@ def cmd_quota(args) -> None:
 
 def cmd_workers(args) -> None:
     async def get():
-        async with websockets.connect(CONFIG.ws_url) as ws:
+        async with websockets.connect(CONFIG.ws_url, max_size=16 * 1024 * 1024) as ws:
             return protocol.loads(await ws.recv())  # hello carries posture
     hello = asyncio.run(get())
     for w in hello["workers"]:
@@ -209,6 +209,37 @@ def cmd_open(args) -> None:
     os.execvp("claude", argv)
 
 
+def cmd_term(args) -> None:
+    """One page, two REAL terminals (spec 010): the cockpit in one pane and the
+    worker's actual CLI in the other — rendered by your terminal, not emulated."""
+    import shutil
+    import subprocess
+    if not shutil.which("tmux"):
+        sys.exit("tmux is not installed — `podium term` needs it for real terminal "
+                 "panes.\nInstall tmux, or use `podium tui` (emulated pane) / "
+                 "`podium open <task>` (hand the whole terminal to one session).")
+    window = "podium"
+    live = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                          capture_output=True, text=True).stdout.split()
+    if window in live:
+        subprocess.run(["tmux", "kill-session", "-t", window])
+    subprocess.run(["tmux", "new-session", "-d", "-s", window, "podium tui"],
+                   check=True)
+    worker = args.session or next(
+        (s for s in live if s.startswith("podium-s_")), None)
+    if worker:
+        # move the worker's own pane into this window: two real terminals, one page
+        subprocess.run(["tmux", "join-pane", "-h", "-s", f"{worker}:",
+                        "-t", f"{window}:0"])
+    else:
+        subprocess.run(["tmux", "split-window", "-h", "-t", f"{window}:0",
+                        "podium sessions; echo; echo 'no live worker session — "
+                        "dispatch one (ctrl+d in the cockpit), then rerun "
+                        "podium term'; exec ${SHELL:-sh}"])
+    subprocess.run(["tmux", "select-pane", "-t", f"{window}:0.0"])
+    os.execvp("tmux", ["tmux", "attach", "-t", window])
+
+
 def cmd_daemon(args) -> None:
     from podium.gateway import main as daemon_main
     daemon_main()
@@ -272,6 +303,10 @@ def main() -> None:
 
     sub.add_parser("daemon", help="run the daemon (podiumd)").set_defaults(fn=cmd_daemon)
     sub.add_parser("tui", help="open the cockpit").set_defaults(fn=cmd_tui)
+
+    s = sub.add_parser("term", help="cockpit + the worker's REAL terminal, side by side")
+    s.add_argument("--session", help="tmux session name of a specific worker")
+    s.set_defaults(fn=cmd_term)
 
     s = sub.add_parser("workspace-add"); s.add_argument("name")
     s.set_defaults(fn=cmd_workspace_add)

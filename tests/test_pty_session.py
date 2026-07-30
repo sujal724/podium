@@ -4,6 +4,8 @@
 import asyncio
 import sys
 
+import pytest
+
 from podium.ids import new_id
 from podium.sessions.pty import PtySession
 from podium.sink import Sink
@@ -68,3 +70,22 @@ async def test_exec_failure_is_error_status(tmp_path):
     await sess.start()
     assert await sess.wait() == 127
     assert sess.status == "error"
+
+
+async def test_real_workers_require_tmux_and_say_so(tmp_path, monkeypatch):
+    """Spec 010 rev 2: coding workers always run in a REAL terminal. Podium never
+    re-renders a worker's UI, so a missing multiplexer is a stated error rather
+    than a silent downgrade to an emulated pane (decision 44)."""
+    import podium.workers.claude as cw
+    from podium.sessions.tmux import TmuxSession
+    sess = cw.ClaudeWorker().make_session("s_t", Sink(), str(tmp_path), "go")
+    assert isinstance(sess, TmuxSession) and sess.kind == "tmux"
+    assert sess.attach_command() == ["tmux", "attach", "-t", "podium-s_t"]
+
+
+async def test_tmux_session_reports_missing_tmux(tmp_path, monkeypatch):
+    from podium.sessions import tmux as tmod
+    monkeypatch.setattr(tmod, "available", lambda: False)
+    sess = tmod.TmuxSession("s_x", "claude", str(tmp_path), Sink(), ["claude"])
+    with pytest.raises(tmod.TmuxUnavailable, match="not installed"):
+        await sess.start()
