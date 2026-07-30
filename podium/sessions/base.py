@@ -1,7 +1,9 @@
 """Session ABC (LLD §2.1). Everything downstream depends only on this contract.
 
-Only `kind="pty"` is concrete in Stage A; the other kinds (sdk/headless/api/codex_rpc/
-gemini_acp) are registered blocked surfaces (surfaces.py), not silent absences.
+Concrete kinds: `pty` (Stage A), `sdk` + `acp` (Stage B interaction layer — Claude
+Agent SDK and Agent Client Protocol, both with native approval callbacks). The rest
+(headless/api/codex_rpc) are registered blocked surfaces (surfaces.py), not silent
+absences.
 """
 
 from abc import ABC, abstractmethod
@@ -67,6 +69,12 @@ class Session(ABC):
 
     def resize(self, rows: int, cols: int) -> None:  # optional capability
         pass
+
+    async def set_mode(self, mode: str) -> None:  # optional capability
+        """Uniform approval-mode control (SDK `set_permission_mode`; ACP
+        `session/set_mode`). Raises on kinds without a native mode channel —
+        an honest error, never a silent no-op."""
+        raise NotImplementedError(f"session kind {self.kind!r} has no mode control")
 
     async def wait(self) -> int:
         """Block until the session exits; return exit code."""

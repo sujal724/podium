@@ -1,11 +1,13 @@
-"""Gemini worker — PTY drive in Stage A (ACP structured kind is a later surface).
+"""Gemini worker — PTY drive from Stage A; Stage B adds `kind="acp"` (`gemini --acp`,
+JSON-RPC over stdio) with native approval callbacks + setSessionMode landing on the
+interaction layer as the uniform prompt (spec 012).
 ToS gray: unattended use is operator opt-in (PODIUM_WORKERS_HEADLESS)."""
 
-import os
 from pathlib import Path
 
 from podium import policy
 from podium.config import CONFIG
+from podium.sessions.acp import AcpSession
 from podium.sessions.base import Session
 from podium.sessions.tmux import TmuxSession
 from podium.sink import Sink
@@ -17,7 +19,7 @@ OAUTH_CREDS = Path("~/.gemini/oauth_creds.json").expanduser()
 @register
 class GeminiWorker(Worker):
     name = "gemini"
-    kinds = ["pty"]
+    kinds = ["pty", "acp"]
 
     def available(self) -> Availability:
         on_path = self._on_path("gemini")
@@ -34,11 +36,15 @@ class GeminiWorker(Worker):
 
     def make_session(self, sid: str, sink: Sink, cwd: str, prompt: str,
                      kind: str | None = None, resume_key: str | None = None,
-                     autonomy: str = "supervised") -> Session:
+                     autonomy: str = "supervised", interaction=None) -> Session:
+        kind = self.check_kind(kind)
         # No settings-level deny surface wired yet: the peer-call deny rides the task
         # preamble (policy.PREAMBLE_DENY, prepended by the dispatcher) — recorded
         # increment, see surfaces.py `peer.deny`.
         # peer shims on PATH enforce the deny at OS level for this adapter too
         env = policy.worker_env(cwd, session_id=sid)
+        if kind == "acp":
+            return AcpSession(sid, self.name, cwd, sink, interaction,
+                              ["gemini", "--acp"], prompt=prompt, env=env)
         argv = ["gemini"] + (["-i", prompt] if prompt else [])
         return TmuxSession(sid, self.name, cwd, sink, argv, env=env)

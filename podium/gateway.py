@@ -20,7 +20,7 @@ import podium
 from podium import protocol
 from podium.config import CONFIG
 from podium.dispatcher import Dispatcher
-from podium.interaction import InteractionLayer
+from podium.interaction import Approvals, InteractionLayer
 from podium.manager import SessionManager
 from podium.metering import Meter
 from podium.sink import Sink
@@ -37,7 +37,8 @@ class Daemon:
         self.sink = Sink()
         self.state = StateStore(state_db or CONFIG.state_db)
         self.work = WorkStore(self.state, self.sink)
-        self.manager = SessionManager(self.sink, self.state)
+        self.approvals = Approvals(self.sink)
+        self.manager = SessionManager(self.sink, self.state, self.approvals)
         self.meter = Meter(self.state, self.sink)
         from podium.workspace import WorkspaceManager
         self.workspaces = WorkspaceManager(workdir or CONFIG.workdir)
@@ -147,7 +148,15 @@ class Daemon:
         await self.manager.write(f["session_id"], f["text"])
 
     async def on_answer(self, f: dict) -> None:
-        # A peer-call approval is answered to the daemon, not typed into the PTY.
+        # One uniform answer path (LLD §18): a pending native approval resolves
+        # through the Approvals registry first; a peer-call approval is answered to
+        # the daemon; anything else translates to the keystrokes the worker's own
+        # dialog expects (or a generic line answer) and lands in the PTY.
+        rid = f.get("request_id") or f.get("question_id")
+        if rid and rid in self.approvals:
+            self.approvals.answer(rid, f["value"], actor=f.get("actor", "human"),
+                                  session_id=f.get("session_id"))
+            return
         qid = str(f.get("question_id", ""))
         if qid.startswith("peer:"):
             allow = str(f["value"]).strip() in ("1", "y", "yes", "approve",
@@ -155,10 +164,19 @@ class Daemon:
             self.dispatcher.answer_peer(qid[len("peer:"):], allow,
                                         f.get("actor", "human"))
             return
-        # Known prompts translate to the exact keystrokes the worker's dialog expects;
-        # anything else is a generic line answer. Native callbacks are Stage B.
-        data = self.interaction.answer_bytes(f.get("question_id", ""), f["value"])
+        data = self.interaction.answer_bytes(qid, f["value"])
         await self.manager.write(f["session_id"], data)
+
+    # interaction layer — native approvals (Stage B, spec 012)
+    async def on_answer_native(self, f: dict) -> dict:
+        self.approvals.answer(f["request_id"], f["value"],
+                              actor=f.get("actor", "human"),
+                              session_id=f.get("session_id"))
+        return {"type": "answer.ack", "request_id": f["request_id"]}
+
+    async def on_interaction_pending(self, f: dict) -> dict:
+        return {"type": "approval.pending",
+                "requests": self.approvals.pending(f.get("session_id"))}
 
     async def on_stop(self, f: dict) -> None:
         await self.manager.stop(f["session_id"])
@@ -168,15 +186,21 @@ class Daemon:
         self.manager.resize(f["session_id"], int(f["rows"]), int(f["cols"]))
 
     async def on_session_mode(self, f: dict) -> dict:
-        """Change a RUNNING session's permission mode (spec 006): drive the CLI's
-        own shift+tab cycle until its status line reports the target mode. Modes are
-        not fixed at spawn — a supervised session can go autonomous mid-flight and
-        back, like taking the wheel."""
+        """Change a RUNNING session's permission mode. Native-channel kinds (sdk/acp)
+        switch through their own callback (SDK `set_permission_mode`, ACP
+        `session/set_mode`); terminal kinds drive the CLI's own shift+tab cycle until
+        its status line reports the target mode (spec 006). Modes are not fixed at
+        spawn — a supervised session can go autonomous mid-flight and back."""
         from podium.interaction import CYCLE_KEY, detect_mode
         sid, target = f["session_id"], f["mode"]
         sess = self.manager.sessions.get(sid)
         if sess is None:
             return protocol.error(f"no live session {sid}")
+        try:
+            await sess.set_mode(target)
+            return {"type": "mode.set", "session_id": sid, "mode": target}
+        except NotImplementedError:
+            pass          # no native mode channel — fall through to the PTY cycle
         if target not in ("supervised", "autonomous", "bypass", "plan"):
             return protocol.error(f"unknown mode {target!r}")
         for _ in range(6):                       # the CLI cycles a short ring

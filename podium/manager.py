@@ -10,10 +10,11 @@ from podium.workers.base import WORKERS, WorkerUnavailable
 
 
 class SessionManager:
-    def __init__(self, sink: Sink, state: StateStore) -> None:
+    def __init__(self, sink: Sink, state: StateStore, interaction=None) -> None:
         self.sessions: dict[str, Session] = {}
         self._sink = sink
         self._state = state
+        self._interaction = interaction
 
     def availability(self) -> list[dict]:
         out = []
@@ -35,7 +36,8 @@ class SessionManager:
             raise WorkerUnavailable(av.hint or f"{worker} unavailable")
         sid = new_id("s")
         sess = w.make_session(sid, self._sink, cwd or CONFIG.workdir, prompt, kind,
-                              resume_key=resume_key, autonomy=autonomy)
+                              resume_key=resume_key, autonomy=autonomy,
+                              interaction=self._interaction)
         sess.autonomy = autonomy
         sess.resumed = bool(resume_key)
         sess.task_id = task_id
@@ -65,6 +67,9 @@ class SessionManager:
 
     def resize(self, sid: str, rows: int, cols: int) -> None:
         self._get(sid).resize(rows, cols)
+
+    async def set_mode(self, sid: str, mode: str) -> None:
+        await self._get(sid).set_mode(mode)
 
     def mark_ended(self, sid: str) -> None:
         sess = self.sessions.get(sid)

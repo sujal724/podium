@@ -108,6 +108,26 @@ def cmd_quota(args) -> None:
     _print(asyncio.run(_rpc({"type": "quota.query"})))
 
 
+def cmd_pending(args) -> None:
+    frames = asyncio.run(_rpc({"type": "interaction.pending"}))
+    for f in frames:
+        if f["type"] != "approval.pending":
+            _print([f])
+            continue
+        if not f["requests"]:
+            print("no pending approvals")
+        for r in f["requests"]:
+            opts = " | ".join(o["id"] for o in r["options"])
+            print(f"{r['id']}  [{r['session_id']}]  {r['title']}  ({opts})")
+            if r.get("detail"):
+                print(f"    {r['detail']}")
+
+
+def cmd_mode(args) -> None:
+    _print(asyncio.run(_rpc({"type": "session.mode", "session_id": args.session_id,
+                             "mode": args.mode})))
+
+
 def cmd_workers(args) -> None:
     async def get():
         async with websockets.connect(CONFIG.ws_url, max_size=16 * 1024 * 1024) as ws:
@@ -483,10 +503,19 @@ def main() -> None:
     s.add_argument("--apply", action="store_true")
     s.set_defaults(fn=cmd_update)
 
-    s = sub.add_parser("answer", help="answer a worker question")
+    s = sub.add_parser("answer", help="answer a worker question or a pending "
+                       "native approval (one uniform answer path)")
     s.add_argument("session_id"); s.add_argument("value")
-    s.add_argument("--question-id", dest="question_id")
+    s.add_argument("--question-id", "--request-id", dest="question_id")
     s.set_defaults(fn=cmd_answer)
+
+    sub.add_parser("pending", help="list pending native approval prompts")\
+        .set_defaults(fn=cmd_pending)
+
+    s = sub.add_parser("mode", help="set a session's approval mode (SDK "
+                                    "permission mode / ACP setSessionMode)")
+    s.add_argument("session_id"); s.add_argument("mode")
+    s.set_defaults(fn=cmd_mode)
 
     s = sub.add_parser("send", help="send a raw wire frame")
     s.add_argument("frame_type"); s.add_argument("--json")
