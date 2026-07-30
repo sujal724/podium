@@ -89,3 +89,29 @@ async def test_tmux_session_reports_missing_tmux(tmp_path, monkeypatch):
     sess = tmod.TmuxSession("s_x", "claude", str(tmp_path), Sink(), ["claude"])
     with pytest.raises(tmod.TmuxUnavailable, match="not installed"):
         await sess.start()
+
+
+async def test_tmux_pipe_is_not_toggled_off_on_adopt(tmp_path, monkeypatch):
+    """Live finding: `pipe-pane -o` TOGGLES, so re-running it during adopt turned
+    output capture OFF and silently blinded the daemon. Ensure-pipe must check the
+    pane's state instead."""
+    from podium.sessions import tmux as tmod
+    calls = []
+
+    def fake_tmux(*args, check=True):
+        calls.append(args)
+        if args[:2] == ("display", "-p"):
+            return "1\n"          # already piped
+        return ""
+
+    monkeypatch.setattr(tmod, "_tmux", fake_tmux)
+    sess = tmod.TmuxSession("s_p", "claude", str(tmp_path), Sink(), ["claude"])
+    sess._ensure_pipe()
+    assert not [c for c in calls if c[0] == "pipe-pane"], "must not re-pipe"
+
+    calls.clear()
+    monkeypatch.setattr(tmod, "_tmux",
+                        lambda *a, check=True: (calls.append(a), "0\n")[1])
+    sess._ensure_pipe()
+    piped = [c for c in calls if c[0] == "pipe-pane"]
+    assert piped and "-o" not in piped[0], "pipe without the toggling -o flag"

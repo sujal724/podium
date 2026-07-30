@@ -71,10 +71,10 @@ class TmuxSession(Session):
             raise TmuxUnavailable(f"tmux session {self.tmux_name} is gone")
         self._capture.parent.mkdir(parents=True, exist_ok=True)
         self._capture.touch()
-        # keep capturing into the same file (pipe-pane is per-pane, lost with the
-        # old daemon only if tmux restarted; -o is a no-op when already piping)
-        _tmux("pipe-pane", "-o", "-t", self.tmux_name,
-              f"cat >> {self._capture!s}", check=False)
+        self._ensure_pipe()
+        # adopt: seed from the pane's scrollback so the daemon sees what happened
+        # while it was down, then read forward from the end of what we now have
+        self._seed_from_pane()
         self._offset = self._capture.stat().st_size
         self.set_status("running")
         self.resumed = True
@@ -95,8 +95,11 @@ class TmuxSession(Session):
         _tmux("new-session", "-d", "-s", self.tmux_name, "-c", self.cwd,
               "-x", str(self._cols), "-y", str(self._rows), *env_args, *self.argv)
         # capture a copy of everything the pane renders — the daemon's eyes
-        _tmux("pipe-pane", "-o", "-t", self.tmux_name,
-              f"cat >> {self._capture!s}")
+        self._ensure_pipe()
+        # pipe-pane only starts piping from NOW, so anything the worker printed
+        # between spawn and this call would be lost (verified live). Seed the
+        # capture from the pane's own scrollback to close that race.
+        self._seed_from_pane()
         self.set_status("running")
         self._reader = asyncio.create_task(self._read_loop())
         if initial_input:
@@ -122,6 +125,34 @@ class TmuxSession(Session):
         self.exit_code = 0
         self.set_status("exited")
         self._exited.set()
+
+    def _ensure_pipe(self) -> None:
+        """Attach output capture only if the pane is not already piped.
+
+        `pipe-pane -o` TOGGLES — verified live: calling it on an already-piped pane
+        turns capture OFF, which silently blinded the daemon after an adopt.
+        """
+        state = _tmux("display", "-p", "-t", self.tmux_name, "#{pane_pipe}",
+                      check=False).strip()
+        if state == "1":
+            return
+        _tmux("pipe-pane", "-t", self.tmux_name, f"cat >> {self._capture!s}",
+              check=False)
+
+    def _seed_from_pane(self) -> None:
+        """Prepend the pane's current scrollback to the capture file — recovers
+        output produced before piping began (start) or while the daemon was down
+        (adopt)."""
+        try:
+            text = _tmux("capture-pane", "-p", "-J", "-S", "-", "-t",
+                         self.tmux_name, check=False)
+        except Exception:
+            return
+        if not text.strip():
+            return
+        # Emit it, never rewrite the capture file: tmux is appending to that file
+        # from another process, and truncating it under `cat >>` loses output.
+        self._emit_output(text + "\n")
 
     def _alive(self) -> bool:
         proc = subprocess.run(["tmux", "has-session", "-t", self.tmux_name],
