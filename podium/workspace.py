@@ -4,6 +4,7 @@ decision 45 — nothing merges without this call). Reject = worktree removed, br
 for inspection, feedback travels with the task.
 """
 
+import contextlib
 import subprocess
 from pathlib import Path
 
@@ -31,8 +32,9 @@ class WorkspaceManager:
     def branch(self, task_id: str) -> str:
         return f"task/{task_id}"
 
-    def create(self, repo_root: str, task_id: str, base_branch: str = "main") -> str:
-        """Worktree on a fresh task branch off the project base branch."""
+    def create(self, repo_root: str, task_id: str, base_ref: str = "main") -> str:
+        """Worktree on a fresh task branch off `base_ref` — the project base branch,
+        or the parent task's branch when this is a subtask."""
         path = self._wt_path(task_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
@@ -42,33 +44,64 @@ class WorkspaceManager:
         if existing:
             _git(repo_root, "worktree", "add", str(path), branch)
         else:
-            _git(repo_root, "worktree", "add", "-b", branch, str(path), base_branch)
+            _git(repo_root, "worktree", "add", "-b", branch, str(path), base_ref)
         return str(path)
 
-    def diff(self, repo_root: str, task_id: str, base_branch: str = "main") -> str:
-        """The reviewable diff: base branch → task branch (committed work only)."""
-        return _git(repo_root, "diff", f"{base_branch}...{self.branch(task_id)}")
+    def diff(self, repo_root: str, task_id: str, base_ref: str = "main") -> str:
+        """The reviewable diff: base → task branch (committed work only). For a
+        subtask the base is its parent's branch, so the diff shows only its own work."""
+        return _git(repo_root, "diff", f"{base_ref}...{self.branch(task_id)}")
 
-    def has_commits(self, repo_root: str, task_id: str, base_branch: str = "main") -> bool:
+    def has_commits(self, repo_root: str, task_id: str, base_ref: str = "main") -> bool:
         out = _git(repo_root, "rev-list", "--count",
-                   f"{base_branch}..{self.branch(task_id)}")
+                   f"{base_ref}..{self.branch(task_id)}")
         return int(out.strip()) > 0
 
-    def approve(self, repo_root: str, task_id: str, base_branch: str = "main") -> None:
-        """Merge the task branch into the base branch, then clean up. A conflict raises
-        GitError — surfaced, never auto-resolved."""
+    def ensure_branch(self, repo_root: str, task_id: str, base_ref: str) -> str:
+        """Create a task's branch (off `base_ref`) without a worktree — so a subtask
+        can branch off its parent's branch before the parent has ever run."""
         branch = self.branch(task_id)
-        current = _git(repo_root, "rev-parse", "--abbrev-ref", "HEAD").strip()
-        if current != base_branch:
-            raise GitError(
-                f"repo checkout is on {current!r}, not base branch {base_branch!r}; "
-                "refusing to merge from a detached position"
-            )
+        if not _git(repo_root, "branch", "--list", branch).strip():
+            _git(repo_root, "branch", branch, base_ref)
+        return branch
+
+    def _worktree_on(self, repo_root: str, ref: str) -> str | None:
+        """Which checkout (if any) currently has `ref` checked out — a merge must run
+        there, since git forbids checking the same branch out twice."""
+        out = _git(repo_root, "worktree", "list", "--porcelain")
+        path = None
+        for line in out.splitlines():
+            if line.startswith("worktree "):
+                path = line.split(" ", 1)[1]
+            elif line.startswith("branch ") and path:
+                if line.split(" ", 1)[1].rsplit("/", 1)[-1] == ref.rsplit("/", 1)[-1]:
+                    return path
+        return None
+
+    def approve(self, repo_root: str, task_id: str, base_ref: str = "main") -> None:
+        """Merge the task branch into its base — the project's base branch for a
+        top-level task, the PARENT TASK's branch for a subtask (branches mirror the
+        task tree). A conflict raises GitError: surfaced, never auto-resolved."""
+        branch = self.branch(task_id)
+        host = self._worktree_on(repo_root, base_ref)
+        temp = None
+        if host is None:
+            # nobody has the base checked out — borrow a scratch worktree for it
+            temp = self.workdir / "merge" / task_id
+            temp.parent.mkdir(parents=True, exist_ok=True)
+            if temp.exists():
+                _git(repo_root, "worktree", "remove", "--force", str(temp))
+            _git(repo_root, "worktree", "add", str(temp), base_ref)
+            host = str(temp)
         try:
-            _git(repo_root, "merge", "--no-ff", "--no-edit", branch)
+            _git(host, "merge", "--no-ff", "--no-edit", branch)
         except GitError:
-            _git(repo_root, "merge", "--abort")
+            with contextlib.suppress(GitError):
+                _git(host, "merge", "--abort")
             raise
+        finally:
+            if temp is not None:
+                _git(repo_root, "worktree", "remove", "--force", str(temp))
         self.remove(repo_root, task_id)
         _git(repo_root, "branch", "-D", branch)
 

@@ -1,7 +1,7 @@
 """Wire frames (LLD §18 subset for Stages A–B). One JSON object per WS message.
 
 Server→client constructors live here so every emitter produces the same shape.
-Additions over §18 (recorded in specs/001 + specs/002 plans): `task.run`,
+Additions over §18 (recorded in specs/001 + specs/011 plans): `task.run`,
 `review.approve`, `review.reject`, the `blocked` answer frame for later-stage
 surfaces, and the interaction-layer set (`approval.request`/`approval.resolved`
 out; `answer.native`/`interaction.pending`/`session.mode` in).
@@ -85,6 +85,11 @@ def quota_update(worker: str, gauge: dict) -> dict:
 
 def narration(task_id: str | None, text: str) -> dict:
     return _f("narration", task_id=task_id, text=text)
+
+
+def update_available(installed: str, remote_version: str, behind: int) -> dict:
+    return _f("update.available", installed=installed,
+              remote_version=remote_version, behind=behind)
 
 
 def blocked(surface: str, stage: str, note: str = "") -> dict:

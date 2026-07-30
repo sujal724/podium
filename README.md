@@ -33,8 +33,8 @@ worktrees, live PTY sessions with takeover, full work model (hierarchy + depende
 approval inbox), review gate, metering ledger with an honest quota gauge, and every
 later-stage surface present as an explicit `blocked` pane (research decision 44).
 
-First Stage-B surface live (`specs/002`): the interaction layer — native approval
+First Stage-B surface live (`specs/011`): the interaction layer — native approval
 callbacks (Claude Agent SDK `can_use_tool` via `kind="sdk"`, ACP
 `request_permission`/`set_mode` via `kind="acp"`) surfaced as one uniform prompt,
-answerable from the TUI (`y`/`n`), CLI (`podium pending` / `answer` / `mode`), or any
-wire client (`answer.native`).
+answerable from the TUI (`ctrl+y`/`ctrl+n`), CLI (`podium pending` / `answer` /
+`mode`), or any wire client (`answer.native`).

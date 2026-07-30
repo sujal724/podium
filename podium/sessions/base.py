@@ -28,13 +28,19 @@ class Session(ABC):
         # Stage A sessions are dispatched autonomous and takeover-able at the PTY level;
         # the drive_mode *swap* machinery is a Stage C surface.
         self.drive_mode = "interactive"
+        # Which permission posture this session runs under, and whether it picked up
+        # a previous conversation — both are shown in the cockpit, never implicit.
+        self.autonomy = "supervised"
+        self.resumed = False
+        self.task_id: str | None = None
         self._sink = sink
         self._buffer = bytearray()
 
     def info(self) -> dict:
         return {"id": self.id, "label": self.label, "kind": self.kind,
                 "status": self.status, "cwd": self.cwd, "drive_mode": self.drive_mode,
-                "exit_code": self.exit_code}
+                "autonomy": self.autonomy, "resumed": self.resumed,
+                "task_id": self.task_id, "exit_code": self.exit_code}
 
     def backlog(self) -> str:
         return self._buffer.decode(errors="replace")

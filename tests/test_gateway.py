@@ -138,6 +138,39 @@ async def test_live_output_and_takeover_over_wire(daemon):
     await ws.close()
 
 
+async def test_worker_dialog_round_trip_over_wire(daemon):
+    """B1: the mock renders a Claude-style trust dialog → Podium raises a uniform
+    question → the operator's answer lands in the PTY → the session proceeds."""
+    d, url, repo = daemon
+    ws, _ = await _client(url)
+    await ws.send(protocol.dumps({"type": "spawn", "worker": "mock",
+                                  "prompt": "[[trust]] [[nocommit]]",
+                                  "cwd": str(repo)}))
+    sid = (await _recv_type(ws, "spawned"))["session"]["id"]
+    q = await _recv_type(ws, "question")
+    assert q["session_id"] == sid
+    assert q["question"]["choices"][0].startswith("Yes")
+    await ws.send(protocol.dumps({"type": "answer", "session_id": sid,
+                                  "question_id": q["question"]["id"], "value": "1"}))
+    seen = ""
+    async with asyncio.timeout(15):
+        while "TRUSTED" not in seen:
+            frame = protocol.loads(await ws.recv())
+            if frame["type"] == "output" and frame["session_id"] == sid:
+                seen += frame["text"]
+    await ws.close()
+
+
+async def test_update_status_over_wire(daemon):
+    d, url, repo = daemon
+    ws, _ = await _client(url)
+    await ws.send(protocol.dumps({"type": "update.status"}))
+    st = await _recv_type(ws, "update.status")
+    assert "installed" in st
+    assert st.get("available") in (True, False)  # honest either way, never absent
+    await ws.close()
+
+
 async def test_events_persisted(daemon):
     d, url, repo = daemon
     ws, _ = await _client(url)

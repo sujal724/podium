@@ -3,7 +3,7 @@
 Persistent bidirectional `ClaudeSDKClient`; the SDK bundles and shells to the real
 `claude` binary over stream-json with the control channel implemented (RESEARCH §1.1).
 Its `can_use_tool` callback is the native approval channel: every permission request
-parks on the InteractionLayer as the one uniform prompt, and the answer maps back to
+parks on the Approvals registry as the one uniform prompt, and the answer maps back to
 a PermissionResult. `set_mode` maps to the SDK's `set_permission_mode`.
 
 The SDK package is an optional dependency (`pip install 'podium[sdk]'`); the import
@@ -15,7 +15,7 @@ import asyncio
 import contextlib
 import json
 
-from podium.interaction import APPROVE_DENY, InteractionLayer
+from podium.interaction import APPROVE_DENY, Approvals
 from podium.sessions.base import Session
 from podium.sink import Sink
 
@@ -44,7 +44,7 @@ def _default_client_factory(session: "SdkSession"):
 
 class SdkSession(Session):
     def __init__(self, sid: str, label: str, cwd: str, sink: Sink,
-                 interaction: InteractionLayer, prompt: str = "",
+                 interaction: Approvals, prompt: str = "",
                  settings: str | None = None, env: dict[str, str] | None = None,
                  permission_mode: str = "default", client_factory=None) -> None:
         super().__init__(sid, label, "sdk", cwd, sink)

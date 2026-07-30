@@ -6,6 +6,7 @@ takeover and daemon driving share one path.
 """
 
 import asyncio
+import codecs
 import fcntl
 import os
 import pty
@@ -32,6 +33,10 @@ class PtySession(Session):
         self._exited = asyncio.Event()
         self._rows = rows or CONFIG.pty_rows
         self._cols = cols or CONFIG.pty_cols
+        # A read can split a multibyte UTF-8 sequence; per-chunk decode corrupts it
+        # into replacement chars (glitchy emoji/box glyphs). Hold partials across
+        # reads instead.
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     async def start(self, initial_input: str | None = None) -> None:
         loop = asyncio.get_running_loop()
@@ -61,7 +66,9 @@ class PtySession(Session):
         except OSError:
             data = b""
         if data:
-            self._emit_output(data.decode(errors="replace"))
+            text = self._decoder.decode(data)
+            if text:
+                self._emit_output(text)
         else:
             self._teardown()
 
@@ -99,20 +106,31 @@ class PtySession(Session):
                 return  # PTY closed under us; teardown will follow via reader
 
     async def stop(self) -> None:
-        if self.pid is None:
+        pid = self.pid
+        if pid is None:
             return
-        try:
-            os.kill(self.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        # The child is a session leader (pty.fork), so signal its whole process
+        # group — CLIs spawn subprocesses that must not outlive the session.
+        self._signal(pid, signal.SIGTERM)
         try:
             await asyncio.wait_for(self._exited.wait(), timeout=5)
         except TimeoutError:
+            self._signal(pid, signal.SIGKILL)
             try:
-                os.kill(self.pid, signal.SIGKILL)
-            except (ProcessLookupError, TypeError):
+                await asyncio.wait_for(self._exited.wait(), timeout=5)
+            except TimeoutError:
+                # last resort: the reader never saw EOF; tear down directly
+                self._teardown()
+
+    @staticmethod
+    def _signal(pid: int, sig: int) -> None:
+        try:
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, OSError):
                 pass
-            await self._exited.wait()
 
     def resize(self, rows: int, cols: int) -> None:
         if self._fd is None:

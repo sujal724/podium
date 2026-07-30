@@ -36,6 +36,8 @@ class Task:
     assignee: str | None
     origin: str
     detector: str | None
+    autonomy: str | None = None
+    base_ref: str | None = None
     labels: list[str] = field(default_factory=list)
     worktree: str | None = None
 
@@ -45,8 +47,9 @@ class Task:
             id=r["id"], project_id=r["project_id"], parent_id=r["parent_id"],
             title=r["title"], description=r["description"] or "", status=r["status"],
             priority=r["priority"], assignee=r["assignee"], origin=r["origin"],
-            detector=r["detector"], labels=json.loads(r["labels"] or "[]"),
-            worktree=r["worktree"],
+            detector=r["detector"], autonomy=r["autonomy"],
+            base_ref=r["base_ref"],
+            labels=json.loads(r["labels"] or "[]"), worktree=r["worktree"],
         )
 
     def to_dict(self) -> dict:
@@ -87,7 +90,7 @@ class WorkStore:
         self, project_id: str | None, title: str, description: str = "",
         parent_id: str | None = None, priority: int = 2, status: str = "backlog",
         assignee: str | None = None, labels: list[str] | None = None,
-        actor: str = "human",
+        actor: str = "human", base_ref: str | None = None,
     ) -> str:
         if status not in ("backlog", "ready"):
             raise ValueError("authored tasks start in backlog or ready")
@@ -95,9 +98,10 @@ class WorkStore:
         ts = now()
         self.state.execute(
             "INSERT INTO tasks(id,project_id,parent_id,title,description,status,priority,"
-            "labels,assignee,origin,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "labels,assignee,origin,base_ref,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, project_id, parent_id, title, description, status, priority,
-             json.dumps(labels or []), assignee, "human", ts, ts),
+             json.dumps(labels or []), assignee, "human", base_ref, ts, ts),
         )
         self._log(tid, "created", actor, {"status": status})
         self._emit(tid)
@@ -152,14 +156,34 @@ class WorkStore:
 
     # --- updates ------------------------------------------------------------
 
+    def ancestors(self, task_id: str) -> list[str]:
+        return [r["id"] for r in self.state.query(
+            "WITH RECURSIVE up(id, parent_id) AS ("
+            "  SELECT id, parent_id FROM tasks WHERE id=:t"
+            "  UNION ALL SELECT t.id, t.parent_id FROM tasks t JOIN up ON t.id=up.parent_id)"
+            " SELECT id FROM up WHERE id != :t", {"t": task_id})]
+
+    def _check_parent(self, task_id: str, parent_id: str | None) -> None:
+        """Subtasks nest arbitrarily deep, but the hierarchy must stay a TREE — a
+        cycle would make base-branch resolution recurse forever (spec 008)."""
+        if not parent_id:
+            return
+        if parent_id == task_id:
+            raise CycleError("a task cannot be its own parent")
+        if task_id in self.ancestors(parent_id) or parent_id == task_id:
+            raise CycleError(f"{parent_id} is a descendant of {task_id}; "
+                             "the subtask hierarchy must stay a tree")
+
     def update_task(self, task_id: str, actor: str = "human", **fields) -> None:
         allowed = {"title", "description", "status", "priority", "assignee", "labels",
-                   "worktree", "parent_id", "project_id"}
+                   "worktree", "parent_id", "project_id", "autonomy", "base_ref"}
         bad = set(fields) - allowed
         if bad:
             raise ValueError(f"cannot update fields: {sorted(bad)}")
         if "status" in fields and fields["status"] not in STATUSES:
             raise ValueError(f"unknown status {fields['status']!r}")
+        if "parent_id" in fields:
+            self._check_parent(task_id, fields["parent_id"])
         if "labels" in fields:
             fields["labels"] = json.dumps(fields["labels"])
         sets = ", ".join(f"{k}=:{k}" for k in fields)

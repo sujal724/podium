@@ -38,8 +38,13 @@ class Worker(ABC):
     @abstractmethod
     def make_session(
         self, sid: str, sink: Sink, cwd: str, prompt: str, kind: str | None = None,
+        resume_key: str | None = None, autonomy: str = "supervised",
         interaction=None,
-    ) -> Session: ...
+    ) -> Session:
+        """`resume_key` continues a previous session of this worker (its own
+        session id) instead of starting fresh — adapters that can't resume ignore
+        it and the caller falls back to a fresh run with feedback. `interaction`
+        is the Approvals registry native-callback kinds (sdk/acp) park on."""
 
     def check_kind(self, kind: str | None) -> str:
         """Resolve the requested session kind against this worker's registered

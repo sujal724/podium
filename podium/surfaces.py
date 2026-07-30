@@ -34,6 +34,19 @@ SURFACES: dict[str, Surface] = {
         Surface(
             "peer.deny", "Peer-call policy-deny + hook ingestion (decision 50)", "A", True,
         ),
+        Surface(
+            "interaction.prompts",
+            "Worker dialogs surfaced as operator questions (PTY slice)", "A", True,
+            "Pulled forward from the Stage B interaction layer by spec 002: known "
+            "worker prompts (trust/login) become uniform questions; native approval "
+            "callbacks remain Stage B.",
+        ),
+        Surface(
+            "update", "Self-update (watch origin/main, operator-approved apply)", "A",
+            True,
+            "Pulled forward from Stage C selfmaint by operator request (spec 002); "
+            "the full Updater/Watcher + Self-Diagnostic remain Stage C.",
+        ),
         # --- Stage B ---
         Surface(
             "interaction", "Interaction layer (native approvals, uniform prompts)", "B",

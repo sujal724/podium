@@ -29,6 +29,15 @@ class Config:
     )
     # Test/dogfood hook: enable the mock worker.
     enable_mock: bool = os.environ.get("PODIUM_ENABLE_MOCK", "0") not in ("0", "false", "")
+    # Self-update watch interval in seconds; 0 disables the periodic check (spec 002).
+    update_check_s: int = int(os.environ.get("PODIUM_UPDATE_CHECK_S", "3600"))
+    # Default autonomy for worker sessions: supervised | autonomous (per-task and
+    # per-project overrides win). See policy.AUTONOMY_MODES.
+    autonomy: str = os.environ.get("PODIUM_AUTONOMY", "supervised")
+    # Mirror worktree Claude sessions into the parent repo's `claude --resume`
+    # picker (spec 004).
+    session_mirror: bool = os.environ.get("PODIUM_SESSION_MIRROR", "1") \
+        not in ("0", "false")
 
     @property
     def ws_url(self) -> str:

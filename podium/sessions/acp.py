@@ -3,10 +3,10 @@
 Generic ACP client (JSON-RPC 2.0, one object per line): Gemini speaks it via
 `gemini --acp` (RESEARCH §1.3), the mock worker via a scripted agent. LLD §2.2 named
 this `gemini_acp`; it lands as plain `acp` because the protocol is agent-agnostic
-(recorded in specs/002 plan).
+(recorded in specs/011 plan).
 
 Native approval channel: the agent's `session/request_permission` request parks on
-the InteractionLayer as the one uniform prompt; the chosen option id goes back as
+the Approvals registry as the one uniform prompt; the chosen option id goes back as
 the `selected` outcome (or `cancelled` when the session ends first). `set_mode`
 maps to ACP `session/set_mode` — Gemini's setSessionMode, adjusting the approval
 level mid-session.
@@ -16,7 +16,7 @@ import asyncio
 import contextlib
 import json
 
-from podium.interaction import CANCELLED, InteractionLayer
+from podium.interaction import CANCELLED, Approvals
 from podium.sessions.base import Session
 from podium.sink import Sink
 
@@ -25,7 +25,7 @@ PROTOCOL_VERSION = 1
 
 class AcpSession(Session):
     def __init__(self, sid: str, label: str, cwd: str, sink: Sink,
-                 interaction: InteractionLayer, argv: list[str],
+                 interaction: Approvals, argv: list[str],
                  prompt: str = "", env: dict[str, str] | None = None) -> None:
         super().__init__(sid, label, "acp", cwd, sink)
         self.interaction = interaction

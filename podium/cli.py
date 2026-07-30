@@ -5,6 +5,7 @@ everything else is a thin one-shot WS client against the running daemon.
 import argparse
 import asyncio
 import json
+import os
 import sys
 
 import websockets
@@ -16,7 +17,7 @@ from podium.config import CONFIG
 async def _rpc(frame: dict, wait_types: tuple[str, ...] = ()) -> list[dict]:
     """Send one frame; collect the direct reply (and any wait_types frames)."""
     out = []
-    async with websockets.connect(CONFIG.ws_url) as ws:
+    async with websockets.connect(CONFIG.ws_url, max_size=16 * 1024 * 1024) as ws:
         # consume hello + snapshot
         await ws.recv()
         await ws.recv()
@@ -122,14 +123,141 @@ def cmd_pending(args) -> None:
                 print(f"    {r['detail']}")
 
 
-def cmd_answer(args) -> None:
-    _print(asyncio.run(_rpc({"type": "answer.native", "session_id": args.session_id,
-                             "request_id": args.request_id, "value": args.value})))
-
-
 def cmd_mode(args) -> None:
     _print(asyncio.run(_rpc({"type": "session.mode", "session_id": args.session_id,
                              "mode": args.mode})))
+
+
+def cmd_workers(args) -> None:
+    async def get():
+        async with websockets.connect(CONFIG.ws_url, max_size=16 * 1024 * 1024) as ws:
+            return protocol.loads(await ws.recv())  # hello carries posture
+    hello = asyncio.run(get())
+    for w in hello["workers"]:
+        mark = "✓ available" if w["ok"] else f"✗ {w.get('hint', 'unavailable')}"
+        extra = f"  [{w['auth']}, tos={w['tos']}]"
+        warn = f"\n    ⚠ {w['warning']}" if w.get("warning") else ""
+        print(f"{w['name']:<12} {mark}{extra}{warn}")
+
+
+def cmd_update(args) -> None:
+    frames = asyncio.run(_rpc({"type": "update.apply" if args.apply
+                               else "update.check"}))
+    for f in frames:
+        if f["type"] == "update.status":
+            if not f.get("available"):
+                print(f"self-update unavailable: {f.get('reason')}")
+            elif f.get("behind", 0) == 0:
+                print(f"up to date (v{f['installed']}, {f.get('head')})")
+            else:
+                print(f"update available: v{f['installed']} → "
+                      f"v{f.get('remote_version')} ({f['behind']} commit(s) behind)\n"
+                      f"apply with: podium update --apply")
+        else:
+            _print([f])
+
+
+def cmd_answer(args) -> None:
+    _print(asyncio.run(_rpc({"type": "answer", "session_id": args.session_id,
+                             "question_id": args.question_id or "",
+                             "value": args.value})))
+
+
+def cmd_sessions(args) -> None:
+    frames = asyncio.run(_rpc({"type": "sessions.list"}))
+    for f in frames:
+        if f["type"] != "sessions.snapshot":
+            continue
+        for s in f["sessions"]:
+            line = (f"{s['id']}  [{s['status']:>11}]  {s['worker']:<7} "
+                    f"{s.get('title') or s.get('task_id') or '(direct spawn)'}")
+            if s.get("resume_key"):
+                line += f"\n{'':14}claude --resume {s['resume_key']}"
+            print(line)
+
+
+MARK = {"workspace": "▣", "project": "▸", "task": "•",
+        "session": "◆", "subagent": "└─◇", "peer": "⚠"}
+
+
+def cmd_tree(args) -> None:
+    """With a task id: everything working on that task. Without: the whole
+    hierarchy — workspace → project → task → session → subagent/peer."""
+    if not args.task_id:
+        frames = asyncio.run(_rpc({"type": "agents.scope"}))
+        for f in frames:
+            if f["type"] != "agents.scope":
+                _print([f]); continue
+            for n in f["nodes"]:
+                st = f" [{n['status']}]" if n.get("status") else ""
+                print(f"{'  ' * n['depth']}{MARK.get(n['kind'], '·')} "
+                      f"{n['label']}{st}")
+        return
+    frames = asyncio.run(_rpc({"type": "agents.tree", "task_id": args.task_id}))
+    for f in frames:
+        if f["type"] != "agents.tree":
+            _print([f]); continue
+        if not f["agents"]:
+            print("no agents recorded for this task yet")
+        for a in f["agents"]:
+            pad = "  " * a["depth"]
+            mark = MARK.get(a["kind"], "·")
+            detail = (a.get("detail") or "")[:70]
+            print(f"{pad}{mark} {a['label']} [{a['status']}] {a['kind']}"
+                  f"{'  ' + detail if detail else ''}")
+
+
+def cmd_open(args) -> None:
+    """Drop into a task's worktree and resume its exact Claude session in THIS
+    terminal (falls back to --continue when the session id isn't captured yet)."""
+    frames = asyncio.run(_rpc({"type": "work.list"}))
+    task = next((t for f in frames if f["type"] == "work.snapshot"
+                 for t in f.get("tasks", []) if t["id"] == args.task_id), None)
+    if task is None:
+        sys.exit(f"no task {args.task_id}")
+    wt = task.get("worktree")
+    if not wt or not os.path.isdir(wt):
+        sys.exit(f"task {args.task_id} has no live worktree "
+                 "(only running/review tasks keep one)")
+    sframes = asyncio.run(_rpc({"type": "sessions.list"}))
+    key = next((s["resume_key"] for f in sframes if f["type"] == "sessions.snapshot"
+                for s in f["sessions"]
+                if s.get("task_id") == args.task_id and s.get("resume_key")), None)
+    argv = ["claude", "--resume", key] if key else ["claude", "--continue"]
+    print(f"→ {wt} ({' '.join(argv)})")
+    os.chdir(wt)
+    os.execvp("claude", argv)
+
+
+def cmd_term(args) -> None:
+    """One page, two REAL terminals (spec 010): the cockpit in one pane and the
+    worker's actual CLI in the other — rendered by your terminal, not emulated."""
+    import shutil
+    import subprocess
+    if not shutil.which("tmux"):
+        sys.exit("tmux is not installed — `podium term` needs it for real terminal "
+                 "panes.\nInstall tmux, or use `podium tui` (emulated pane) / "
+                 "`podium open <task>` (hand the whole terminal to one session).")
+    window = "podium"
+    live = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                          capture_output=True, text=True).stdout.split()
+    if window in live:
+        subprocess.run(["tmux", "kill-session", "-t", window])
+    subprocess.run(["tmux", "new-session", "-d", "-s", window, "podium tui"],
+                   check=True)
+    worker = args.session or next(
+        (s for s in live if s.startswith("podium-s_")), None)
+    if worker:
+        # move the worker's own pane into this window: two real terminals, one page
+        subprocess.run(["tmux", "join-pane", "-h", "-s", f"{worker}:",
+                        "-t", f"{window}:0"])
+    else:
+        subprocess.run(["tmux", "split-window", "-h", "-t", f"{window}:0",
+                        "podium sessions; echo; echo 'no live worker session — "
+                        "dispatch one (ctrl+d in the cockpit), then rerun "
+                        "podium term'; exec ${SHELL:-sh}"])
+    subprocess.run(["tmux", "select-pane", "-t", f"{window}:0.0"])
+    os.execvp("tmux", ["tmux", "attach", "-t", window])
 
 
 def cmd_daemon(args) -> None:
@@ -196,6 +324,10 @@ def main() -> None:
     sub.add_parser("daemon", help="run the daemon (podiumd)").set_defaults(fn=cmd_daemon)
     sub.add_parser("tui", help="open the cockpit").set_defaults(fn=cmd_tui)
 
+    s = sub.add_parser("term", help="cockpit + the worker's REAL terminal, side by side")
+    s.add_argument("--session", help="tmux session name of a specific worker")
+    s.set_defaults(fn=cmd_term)
+
     s = sub.add_parser("workspace-add"); s.add_argument("name")
     s.set_defaults(fn=cmd_workspace_add)
 
@@ -217,6 +349,15 @@ def main() -> None:
     s.add_argument("task_id"); s.add_argument("--worker")
     s.set_defaults(fn=cmd_task_run)
 
+    s = sub.add_parser("open", help="resume a task's claude session in this terminal")
+    s.add_argument("task_id"); s.set_defaults(fn=cmd_open)
+
+    sub.add_parser("sessions", help="list sessions with claude resume commands"
+                   ).set_defaults(fn=cmd_sessions)
+
+    s = sub.add_parser("tree", help="hierarchy: workspace→project→task→session→agents")
+    s.add_argument("task_id", nargs="?"); s.set_defaults(fn=cmd_tree)
+
     s = sub.add_parser("review"); s.add_argument("task_id"); s.set_defaults(fn=cmd_review)
     s = sub.add_parser("approve"); s.add_argument("task_id"); s.set_defaults(fn=cmd_approve)
     s = sub.add_parser("reject")
@@ -224,14 +365,21 @@ def main() -> None:
     s.set_defaults(fn=cmd_reject)
 
     sub.add_parser("quota").set_defaults(fn=cmd_quota)
+    sub.add_parser("workers", help="worker availability + posture").set_defaults(
+        fn=cmd_workers)
+
+    s = sub.add_parser("update", help="check for / apply a Podium update")
+    s.add_argument("--apply", action="store_true")
+    s.set_defaults(fn=cmd_update)
+
+    s = sub.add_parser("answer", help="answer a worker question or a pending "
+                       "native approval (one uniform answer path)")
+    s.add_argument("session_id"); s.add_argument("value")
+    s.add_argument("--question-id", "--request-id", dest="question_id")
+    s.set_defaults(fn=cmd_answer)
 
     sub.add_parser("pending", help="list pending native approval prompts")\
         .set_defaults(fn=cmd_pending)
-
-    s = sub.add_parser("answer", help="answer a native approval prompt")
-    s.add_argument("session_id"); s.add_argument("request_id")
-    s.add_argument("value", help="one of the prompt's option ids")
-    s.set_defaults(fn=cmd_answer)
 
     s = sub.add_parser("mode", help="set a session's approval mode (SDK "
                                     "permission mode / ACP setSessionMode)")

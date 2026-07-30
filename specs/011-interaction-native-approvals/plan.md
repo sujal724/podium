@@ -1,4 +1,4 @@
-# Plan 002 — Interaction layer: native approval callbacks
+# Plan 011 — Interaction layer: native approval callbacks
 
 ## Approach
 

@@ -1,5 +1,5 @@
 """Mock worker — a tiny scripted CLI under a real PTY (A1/A2), plus a scripted ACP
-agent (`kind="acp"`) proving the uniform approval prompt (spec 002 B-criteria) —
+agent (`kind="acp"`) proving the uniform approval prompt (spec 011 B-criteria) —
 all without spending any quota. Only registered when PODIUM_ENABLE_MOCK is set,
 so it can never be routed real work by accident."""
 
@@ -26,14 +26,17 @@ class MockWorker(Worker):
                             headless_ok=True)
 
     def make_session(self, sid: str, sink: Sink, cwd: str, prompt: str,
-                     kind: str | None = None, interaction=None) -> Session:
+                     kind: str | None = None, resume_key: str | None = None,
+                     autonomy: str = "supervised", interaction=None) -> Session:
         kind = self.check_kind(kind)
         if kind == "acp":
             return AcpSession(sid, self.name, cwd, sink, interaction,
                               [sys.executable, "-u", str(MOCK_ACP_AGENT)],
                               prompt=prompt)
-        return PtySession(sid, self.name, cwd, sink,
-                          [sys.executable, "-u", str(MOCK_CLI), prompt])
+        argv = [sys.executable, "-u", str(MOCK_CLI), prompt]
+        if resume_key:
+            argv.append(f"--resume={resume_key}")
+        return PtySession(sid, self.name, cwd, sink, argv)
 
 
 if CONFIG.enable_mock:
