@@ -355,53 +355,45 @@ class Cockpit(App):
         elif t == "error":
             feed.write(f"[red]error:[/red] {f['message']} {f.get('detail', '')}")
 
+    # Group by WHAT NEEDS YOU, not by project: a flat list with the status in
+    # brackets made "is anything running? is anything waiting on me?"
+    # unanswerable at a glance (operator finding).
+    GROUPS = [
+        ("★ NEEDS YOU", ("review", "proposed", "blocked")),
+        ("▶ RUNNING", ("running", "assigned", "verifying")),
+        ("○ QUEUED", ("ready",)),
+        ("· WAITING", ("backlog", "parked")),
+        ("✓ DONE", ("done",)),
+    ]
+
     def _render_board(self, snap: dict) -> None:
         tree = self.query_one("#board-tree", Tree)
         tree.clear()
-        projects: dict[str, list] = {}
-        for task in snap.get("tasks", []):
-            projects.setdefault(task["project_id"], []).append(task)
+        tasks = [t for t in snap.get("tasks", []) if t["status"] != "discarded"]
         proj_names = {p["id"]: p["name"] for p in snap.get("projects", [])}
-        for pid, tasks in projects.items():
-            node = tree.root.add(proj_names.get(pid, pid or "(no project)"),
-                                 expand=True)
-            for task in tasks:
-                label = f"[{task['status']}] P{task['priority']} {task['title']}"
-                leaf = node.add_leaf(label)
+        by_status: dict[str, list] = {}
+        for task in tasks:
+            by_status.setdefault(task["status"], []).append(task)
+
+        counts = "  ".join(f"{len(v)} {k}" for k, v in
+                           sorted(by_status.items(), key=lambda kv: -len(kv[1])))
+        tree.root.label = f"{len(tasks)} tasks — {counts}"
+
+        for title, statuses in self.GROUPS:
+            rows = [t for st in statuses for t in by_status.get(st, [])]
+            if not rows:
+                continue
+            group = tree.root.add(f"{title} ({len(rows)})",
+                                  expand=title != "✓ DONE")
+            for task in sorted(rows, key=lambda t: (t["priority"], t["id"])):
+                who = f"  ← {task['assignee']}" if task.get("assignee") else ""
+                proj = proj_names.get(task["project_id"], "")
+                label = f"P{task['priority']} {task['title']}{who}"
+                if proj:
+                    label += f"   [{proj}]"
+                leaf = group.add_leaf(label.rstrip())
                 leaf.data = task["id"]
         tree.root.expand()
-
-    def _render_approvals(self) -> None:
-        log = self.query_one("#approvals-log", RichLog)
-        log.clear()
-        if not self.pending_approvals:
-            log.write("no pending approvals — native prompts (SDK can_use_tool, "
-                      "ACP request_permission) land here; ctrl+y allows, ctrl+n "
-                      "denies the oldest")
-            return
-        for r in self.pending_approvals:
-            opts = " / ".join(o["id"] for o in r["options"])
-            log.write(f"{r['id']}  [{r['session_id']}]  {r['title']}  ({opts})")
-            if r.get("detail"):
-                log.write(f"    {r['detail']}")
-
-    @staticmethod
-    def _pick_option(request: dict, allow: bool) -> str:
-        """The uniform prompt carries driver-native options; map y/n onto them by
-        their ACP-style kind, falling back to first (allow) / last (deny)."""
-        prefix = "allow" if allow else "reject"
-        for o in request["options"]:
-            if o.get("kind", "").startswith(prefix):
-                return o["id"]
-        return request["options"][0 if allow else -1]["id"]
-
-    async def _answer_oldest(self, allow: bool) -> None:
-        if not self.pending_approvals:
-            return
-        request = self.pending_approvals[0]
-        await self._send({"type": "answer.native", "session_id": request["session_id"],
-                          "request_id": request["id"],
-                          "value": self._pick_option(request, allow)})
 
     def _render_quota(self, f: dict) -> None:
         # "unavailable" here means the READ SURFACE isn't wired (ADR-0005), not
