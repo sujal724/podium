@@ -351,6 +351,69 @@ class Daemon:
         return {"type": "agents.tree", "task_id": f["task_id"],
                 "agents": self.dispatcher.agents.tree(f["task_id"])}
 
+    async def on_session_target(self, f: dict) -> dict:
+        """Where a session's REAL terminal is, so a client can point a pane at it
+        instead of stealing its own (spec 014)."""
+        sid = f.get("session_id")
+        if not sid and f.get("task_id"):
+            rows = self.state.query(
+                "SELECT id FROM sessions WHERE task_id=? ORDER BY created_at DESC"
+                " LIMIT 1", (f["task_id"],))
+            sid = rows[0]["id"] if rows else None
+        if not sid:
+            return protocol.error("no session for that task")
+        rows = self.state.query("SELECT * FROM sessions WHERE id=?", (sid,))
+        if not rows:
+            return protocol.error(f"no session {sid}")
+        row = dict(rows[0])
+        from podium.sessions.tmux import live_sessions
+        name = f"podium-{sid}"
+        return {"type": "session.target", "session_id": sid,
+                "tmux": name, "live": name in live_sessions(),
+                "cwd": row["cwd"], "resume_key": row["resume_key"],
+                "attach": ["tmux", "attach", "-t", name],
+                "resume": (["claude", "--resume", row["resume_key"]]
+                           if row["resume_key"] else ["claude", "--continue"])}
+
+    # ---- #5 review queue ------------------------------------------------
+    async def on_review_queue(self, f: dict) -> dict:
+        """Everything awaiting you — not one variable (spec 015)."""
+        rows = self.state.query(
+            "SELECT id,title,priority,updated_at FROM tasks WHERE status='review'"
+            " ORDER BY priority, updated_at")
+        out = []
+        for r in rows:
+            task = self.work.get_task(r["id"])
+            proj = self.dispatcher._project(task)
+            base = self.dispatcher.base_ref_for(task, proj)
+            out.append({**dict(r), "merge_target": base,
+                        "branch": self.workspaces.branch(r["id"])})
+        return {"type": "review.snapshot", "tasks": out}
+
+    # ---- #6 housekeeping ------------------------------------------------
+    async def on_sessions_gc(self, f: dict) -> dict:
+        """Collapse dead sessions: keep the newest `keep` per task, drop the rest
+        from the listing (rows stay for history)."""
+        keep = int(f.get("keep", 3))
+        removed = self.state.execute(
+            "UPDATE sessions SET status='archived' WHERE id IN ("
+            "  SELECT id FROM (SELECT id, ROW_NUMBER() OVER ("
+            "    PARTITION BY task_id ORDER BY created_at DESC) rn FROM sessions"
+            "    WHERE status IN ('exited','error','interrupted')) WHERE rn > ?)",
+            (keep,)).rowcount
+        return {"type": "sessions.gc", "archived": removed, "kept_per_task": keep}
+
+    async def on_approvals_pending(self, f: dict) -> dict:
+        """Questions still waiting on you — a missed dialog is not lost (spec 016)."""
+        pend = [{"id": q.id, "session_id": q.session_id, "kind": q.pattern.id,
+                 "q": q.pattern.question, "choices": list(q.choices)}
+                for q in self.interaction.pending.values()]
+        pend += [{"id": f"peer:{rid}", "session_id": sid, "kind": "peer",
+                  "q": f"run {ev.get('command', '')}?",
+                  "choices": ["Approve — run it", "Deny"]}
+                 for rid, (wt, ev, sid) in self.dispatcher.pending_peers.items()]
+        return {"type": "approvals.pending", "questions": pend}
+
     async def on_task_detail(self, f: dict) -> dict:
         """Everything about one task in one answer (spec 012)."""
         from podium import detail

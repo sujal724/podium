@@ -334,6 +334,9 @@ class Dispatcher:
         self.work.set_status(task_id, "review", data={"exit_code": exit_code})
         self.sink.emit(protocol.review_ready(
             task_id, diff, self.workspaces.branch(task_id)))
+        self.sink.emit(protocol.narration(
+            task_id, f"✅ ready for review — approving merges "
+                     f"{self.workspaces.branch(task_id)} → {base}"))
 
     # --- the review gate (decision 45) --------------------------------------
 
@@ -360,7 +363,10 @@ class Dispatcher:
             self.workspaces.approve(proj["repo_root"], task_id, base)
         except GitError as e:
             self.work.set_status(task_id, "blocked", actor=actor,
-                                 data={"error": f"merge failed: {e}"})
+                                 data={"error": f"merge failed: {e}",
+                                       "next": "resolve the conflict on "
+                                               f"{self.workspaces.branch(task_id)}, "
+                                               "then approve again"})
             raise
         self.work.update_task(task_id, actor=actor, worktree=None, status="done")
         self.sink.emit(protocol.narration(

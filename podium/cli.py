@@ -246,6 +246,65 @@ def cmd_task(args) -> None:
         print(f"    {mark} {name:<9} {a['reason']}")
 
 
+def cmd_queue(args) -> None:
+    """Everything awaiting your review, with where each would land."""
+    frames = asyncio.run(_rpc({"type": "review.queue"}))
+    for f in frames:
+        if f["type"] != "review.snapshot":
+            _print([f]); continue
+        if not f["tasks"]:
+            print("nothing awaiting review")
+        for t in f["tasks"]:
+            print(f"{t['id']}  P{t['priority']}  {t['title']}\n"
+                  f"{'':12}approve merges {t['branch']} → {t['merge_target']}")
+
+
+def cmd_pending(args) -> None:
+    """Approvals still waiting on you (a missed dialog is not lost)."""
+    frames = asyncio.run(_rpc({"type": "approvals.pending"}))
+    for f in frames:
+        if f["type"] != "approvals.pending":
+            _print([f]); continue
+        if not f["questions"]:
+            print("no pending approvals")
+        for q in f["questions"]:
+            print(f"{q['id']}  [{q['kind']}]  {q['q']}")
+            for i, c in enumerate(q["choices"], 1):
+                print(f"{'':4}{i}. {c}")
+            print(f"{'':4}answer: podium answer {q['session_id']} <n> "
+                  f"--question-id {q['id']}")
+
+
+def cmd_gc(args) -> None:
+    _print(asyncio.run(_rpc({"type": "sessions.gc", "keep": args.keep})))
+
+
+def cmd_attach(args) -> None:
+    """Attach to a session's REAL terminal — the other tmux pane when inside
+    tmux, otherwise this terminal."""
+    import os
+    import subprocess
+    frames = asyncio.run(_rpc({"type": "session.target",
+                               "session_id": args.session, "task_id": args.task}))
+    tgt = next((f for f in frames if f["type"] == "session.target"), None)
+    if tgt is None:
+        _print(frames); sys.exit(1)
+    if not tgt["live"]:
+        print(f"session {tgt['session_id']} has no live terminal; resuming instead")
+        os.chdir(tgt["cwd"]); os.execvp(tgt["resume"][0], tgt["resume"])
+    if os.environ.get("TMUX"):
+        me = os.environ.get("TMUX_PANE", "")
+        panes = subprocess.run(["tmux", "list-panes", "-F", "#{pane_id}"],
+                               capture_output=True, text=True).stdout.split()
+        other = next((p for p in panes if p != me), None)
+        if other:
+            subprocess.run(["tmux", "join-pane", "-h", "-s", f"{tgt['tmux']}:",
+                            "-t", other], check=False)
+            print(f"session {tgt['session_id']} is now in pane {other}")
+            return
+    os.execvp("tmux", tgt["attach"])
+
+
 def cmd_open(args) -> None:
     """Drop into a task's worktree and resume its exact Claude session in THIS
     terminal (falls back to --continue when the session id isn't captured yet)."""
@@ -407,6 +466,16 @@ def main() -> None:
     s.set_defaults(fn=cmd_reject)
 
     sub.add_parser("quota").set_defaults(fn=cmd_quota)
+    sub.add_parser("queue", help="tasks awaiting your review").set_defaults(fn=cmd_queue)
+    sub.add_parser("pending", help="approvals waiting on you").set_defaults(
+        fn=cmd_pending)
+
+    s = sub.add_parser("gc", help="archive old dead sessions")
+    s.add_argument("--keep", type=int, default=3); s.set_defaults(fn=cmd_gc)
+
+    s = sub.add_parser("attach", help="attach to a session's real terminal")
+    s.add_argument("--session"); s.add_argument("--task")
+    s.set_defaults(fn=cmd_attach)
     sub.add_parser("workers", help="worker availability + posture").set_defaults(
         fn=cmd_workers)
 

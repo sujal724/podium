@@ -8,6 +8,7 @@ Connects to podiumd over the wire protocol like any other client.
 """
 
 import asyncio
+import shutil
 import subprocess
 
 import websockets
@@ -77,7 +78,8 @@ class Cockpit(App):
         Binding("ctrl+u", "requeue", "re-queue task"),
         Binding("ctrl+b", "focus_board", "board"),
         Binding("ctrl+q", "quit", "quit"),
-        Binding("escape", "send_escape", "esc → session"),
+        Binding("escape", "back", "back"),
+        Binding("ctrl+c", "send_escape", "interrupt session"),
     ]
 
     def __init__(self) -> None:
@@ -393,6 +395,19 @@ class Cockpit(App):
     def action_focus_takeover(self) -> None:
         self.query_one("#takeover", Input).focus()
 
+    def _tmux_other_pane(self) -> str | None:
+        """The pane that is NOT the cockpit's, when running inside tmux."""
+        import os
+        import subprocess
+        if not os.environ.get("TMUX"):
+            return None
+        me = os.environ.get("TMUX_PANE", "")
+        panes = subprocess.run(
+            ["tmux", "list-panes", "-F", "#{pane_id}"],
+            capture_output=True, text=True).stdout.split()
+        others = [p for p in panes if p != me]
+        return others[0] if others else None
+
     async def action_open_in_claude(self) -> None:
         """One-key takeover: suspend the cockpit and hand the terminal to the real
         Claude UI for this session (its own worktree, its own conversation). Exit
@@ -411,10 +426,23 @@ class Cockpit(App):
         argv = ["claude", "--resume", rec["resume_key"]] if rec.get("resume_key") \
             else ["claude", "--continue"]
         cwd = rec.get("cwd")
-        feed.write(f"opening {sid} in claude ({' '.join(argv)})…")
-        with self.suspend():
-            subprocess.run(argv, cwd=cwd)
-        self.refresh()
+        target = self._tmux_other_pane()
+        if target:
+            # Inside tmux: drive the OTHER pane. Never steal the cockpit's own pane
+            # (dogfood: ctrl+o replaced the left pane instead of the right).
+            subprocess.run(["tmux", "respawn-pane", "-k", "-t", target,
+                            "-c", cwd or ".", *argv])
+            feed.write(f"opened {sid} in pane {target} — ctrl+b o to switch panes")
+            return
+        # Outside tmux: a detached terminal if we have one, else take this terminal
+        for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
+            if shutil.which(term):
+                subprocess.Popen([term, "-e", *argv], cwd=cwd,
+                                 start_new_session=True)
+                feed.write(f"opened {sid} in a new {term} window")
+                return
+        feed.write(f"no tmux pane or terminal available — run: "
+                   f"cd {cwd} && {' '.join(argv)}")
 
     async def action_change_mode(self) -> None:
         """Modes are not fixed at spawn: switch a live session's permission mode."""
@@ -456,6 +484,18 @@ class Cockpit(App):
         return out
 
     def action_focus_board(self) -> None:
+        self.query_one("#board-tree", Tree).focus()
+
+    def action_back(self) -> None:
+        """Up one level: session → task → board (spec 013)."""
+        feed = self.query_one("#feed-log", RichLog)
+        if self.selected_session:
+            self.selected_session = None
+            self._update_session_bar()
+            feed.write("← back to task")
+        elif self.selected_task:
+            self.selected_task = None
+            feed.write("← back to board")
         self.query_one("#board-tree", Tree).focus()
 
     async def action_send_escape(self) -> None:
