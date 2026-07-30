@@ -111,21 +111,6 @@ def cmd_quota(args) -> None:
     _print(asyncio.run(_rpc({"type": "quota.query"})))
 
 
-def cmd_pending(args) -> None:
-    frames = asyncio.run(_rpc({"type": "interaction.pending"}))
-    for f in frames:
-        if f["type"] != "approval.pending":
-            _print([f])
-            continue
-        if not f["requests"]:
-            print("no pending approvals")
-        for r in f["requests"]:
-            opts = " | ".join(o["id"] for o in r["options"])
-            print(f"{r['id']}  [{r['session_id']}]  {r['title']}  ({opts})")
-            if r.get("detail"):
-                print(f"    {r['detail']}")
-
-
 def cmd_mode(args) -> None:
     _print(asyncio.run(_rpc({"type": "session.mode", "session_id": args.session_id,
                              "mode": args.mode})))
@@ -283,19 +268,34 @@ def cmd_queue(args) -> None:
 
 
 def cmd_pending(args) -> None:
-    """Approvals still waiting on you (a missed dialog is not lost)."""
-    frames = asyncio.run(_rpc({"type": "approvals.pending"}))
-    for f in frames:
+    """Everything waiting on you, from BOTH approval paths: native requests raised
+    by a worker's own SDK/ACP callback, and dialog/peer approvals Podium brokers.
+    Two commands used to exist — one per path — which silently shadowed each other
+    and then collided at parse time, breaking every podium command."""
+    found = 0
+    for f in asyncio.run(_rpc({"type": "approvals.pending"})):
         if f["type"] != "approvals.pending":
-            _print([f]); continue
-        if not f["questions"]:
-            print("no pending approvals")
+            continue
         for q in f["questions"]:
+            found += 1
             print(f"{q['id']}  [{q['kind']}]  {q['q']}")
             for i, c in enumerate(q["choices"], 1):
                 print(f"{'':4}{i}. {c}")
             print(f"{'':4}answer: podium answer {q['session_id']} <n> "
                   f"--question-id {q['id']}")
+    for f in asyncio.run(_rpc({"type": "interaction.pending"})):
+        if f["type"] != "approval.pending":
+            continue
+        for r in f.get("requests", []):
+            found += 1
+            opts = " | ".join(o["id"] for o in r["options"])
+            print(f"{r['id']}  [native]  {r['title']}  ({opts})")
+            if r.get("detail"):
+                print(f"{'':4}{r['detail']}")
+            print(f"{'':4}answer: podium answer {r['session_id']} <option> "
+                  f"--request-id {r['id']}")
+    if not found:
+        print("no pending approvals")
 
 
 def cmd_gc(args) -> None:
@@ -505,7 +505,7 @@ def main() -> None:
 
     sub.add_parser("quota").set_defaults(fn=cmd_quota)
     sub.add_parser("queue", help="tasks awaiting your review").set_defaults(fn=cmd_queue)
-    sub.add_parser("pending", help="approvals waiting on you").set_defaults(
+    sub.add_parser("pending", help="approvals waiting on you (native + brokered)").set_defaults(
         fn=cmd_pending)
 
     s = sub.add_parser("gc", help="archive old dead sessions")
@@ -526,9 +526,6 @@ def main() -> None:
     s.add_argument("session_id"); s.add_argument("value")
     s.add_argument("--question-id", "--request-id", dest="question_id")
     s.set_defaults(fn=cmd_answer)
-
-    sub.add_parser("pending", help="list pending native approval prompts")\
-        .set_defaults(fn=cmd_pending)
 
     s = sub.add_parser("mode", help="set a session's approval mode (SDK "
                                     "permission mode / ACP setSessionMode)")
