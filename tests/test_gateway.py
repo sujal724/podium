@@ -185,3 +185,54 @@ async def test_events_persisted(daemon):
     assert json.loads(rows[-1]["data"])["task"]["title"] == "evt"
     assert wid
     await ws.close()
+
+
+async def test_review_queue_and_pending_and_gc(daemon):
+    """Specs 015/016: everything awaiting the operator is a QUEUE (not one
+    variable), missed approvals are recoverable, and dead sessions are collapsed."""
+    d, url, repo = daemon
+    ws = d.work.create_workspace("w")
+    proj = d.work.create_project(ws, "p", repo_root=str(repo))
+    t1 = d.work.create_task(proj, "first", status="ready")
+    t2 = d.work.create_task(proj, "second", status="ready")
+    d.work.set_status(t1, "review")
+    d.work.set_status(t2, "review")
+
+    q = await d.dispatch_frame({"type": "review.queue"})
+    ids = [x["id"] for x in q["tasks"]]
+    assert t1 in ids and t2 in ids                     # both actionable, not just one
+    assert all(x["merge_target"] == "main" for x in q["tasks"])
+    assert all(x["branch"].startswith("task/") for x in q["tasks"])
+
+    # a pending approval survives being missed
+    d.interaction.scan("s_q", "claude", "Do you want to proceed?\n1. Yes\n2. No\n")
+    pend = await d.dispatch_frame({"type": "approvals.pending"})
+    assert pend["questions"] and pend["questions"][0]["choices"][:1] == ["Yes"]
+
+    # gc archives all but the newest N dead sessions per task
+    for i in range(5):
+        d.state.execute(
+            "INSERT INTO sessions(id,task_id,worker,kind,cwd,status,created_at)"
+            " VALUES(?,?,'claude','tmux','/tmp','exited',?)", (f"s_{i}", t1, i))
+    res = await d.dispatch_frame({"type": "sessions.gc", "keep": 2})
+    assert res["archived"] == 3
+    live = d.state.query("SELECT id FROM sessions WHERE task_id=? AND status='exited'",
+                         (t1,))
+    assert len(live) == 2
+
+
+async def test_session_target_points_at_the_real_terminal(daemon):
+    """Spec 014: a client asks WHERE a session's terminal is instead of stealing
+    its own pane."""
+    d, url, repo = daemon
+    ws = d.work.create_workspace("w")
+    proj = d.work.create_project(ws, "p", repo_root=str(repo))
+    t = d.work.create_task(proj, "x", status="ready")
+    d.state.execute(
+        "INSERT INTO sessions(id,task_id,worker,kind,cwd,status,resume_key,created_at)"
+        " VALUES('s_tg',?,'claude','tmux',?,'running','uuid-1',1)", (t, str(repo)))
+    tgt = await d.dispatch_frame({"type": "session.target", "task_id": t})
+    assert tgt["tmux"] == "podium-s_tg"
+    assert tgt["attach"] == ["tmux", "attach", "-t", "podium-s_tg"]
+    assert tgt["resume"] == ["claude", "--resume", "uuid-1"]
+    assert tgt["live"] is False        # no tmux here — stated, not faked

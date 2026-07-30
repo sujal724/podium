@@ -334,6 +334,9 @@ class Dispatcher:
         self.work.set_status(task_id, "review", data={"exit_code": exit_code})
         self.sink.emit(protocol.review_ready(
             task_id, diff, self.workspaces.branch(task_id)))
+        self.sink.emit(protocol.narration(
+            task_id, f"✅ ready for review — approving merges "
+                     f"{self.workspaces.branch(task_id)} → {base}"))
 
     # --- the review gate (decision 45) --------------------------------------
 
@@ -360,7 +363,10 @@ class Dispatcher:
             self.workspaces.approve(proj["repo_root"], task_id, base)
         except GitError as e:
             self.work.set_status(task_id, "blocked", actor=actor,
-                                 data={"error": f"merge failed: {e}"})
+                                 data={"error": f"merge failed: {e}",
+                                       "next": "resolve the conflict on "
+                                               f"{self.workspaces.branch(task_id)}, "
+                                               "then approve again"})
             raise
         self.work.update_task(task_id, actor=actor, worktree=None, status="done")
         self.sink.emit(protocol.narration(
@@ -389,19 +395,77 @@ class Dispatcher:
 
     # --- durability seed (decision 23) --------------------------------------
 
+    async def adopt_live_sessions(self) -> list[str]:
+        """Boot step 1 (spec 011): workers run in tmux and OUTLIVE the daemon, so
+        adopt the ones still running instead of re-queuing their tasks — re-queuing
+        would start a second worker on the same task while the first kept going."""
+        from podium.sessions.tmux import TmuxSession, live_sessions
+        alive = live_sessions()
+        adopted = []
+        for r in self.state.query(
+                "SELECT * FROM sessions WHERE ended_at IS NULL AND status NOT IN"
+                " ('exited','error','interrupted') ORDER BY created_at"):
+            name = f"podium-{r['id']}"
+            if name not in alive or not r["task_id"]:
+                continue
+            try:
+                sess = TmuxSession(r["id"], r["worker"], r["cwd"], self.sink, [])
+                sess.task_id = r["task_id"]
+                await sess.adopt()
+            except Exception as e:
+                self.state.log_event(r["id"], "adopt.failed", {"error": str(e)})
+                continue
+            self.manager.sessions[sess.id] = sess
+            self.work.set_status(r["task_id"], "running", actor="system",
+                                 data={"reason": "adopted a worker that survived "
+                                                 "the daemon"})
+            runner = asyncio.create_task(self._monitor_adopted(r["task_id"], sess))
+            self.running[r["task_id"]] = runner
+            runner.add_done_callback(
+                lambda _, tid=r["task_id"]: self.running.pop(tid, None))
+            self.sink.emit(protocol.narration(
+                r["task_id"], f"adopted live session {sess.id} — it kept running "
+                              "while the daemon was down"))
+            adopted.append(r["task_id"])
+        return adopted
+
+    async def _monitor_adopted(self, task_id: str, sess) -> None:
+        """Watch an adopted worker to completion and run the normal finish path, so
+        an adopted task still reaches review exactly like a freshly dispatched one."""
+        try:
+            proj = self._project(self.work.get_task(task_id))
+            exit_code = await sess.wait()
+            self.manager.mark_ended(sess.id)
+            self.agents.close_session(sess.id,
+                                      "done" if exit_code == 0 else "error")
+            await self._finish(task_id, proj, exit_code)
+        except Exception as e:
+            self.work.set_status(task_id, "blocked", data={"error": str(e)})
+
     def resume_interrupted(self) -> list[str]:
-        """On daemon boot: interrupted assigned/running tasks → ready (re-dispatch);
-        open sessions marked interrupted. Live resume/fork is a later increment."""
+        """Boot step 2: whatever did NOT survive is re-queued. `adopt_live_sessions`
+        runs first, so a task with a living worker is already `running` here."""
         requeued = []
         for r in self.state.query(
                 "SELECT id FROM tasks WHERE status IN ('assigned','running')"):
+            if r["id"] in self.running:          # adopted — leave it alone
+                continue
+            # Record the interrupt BEFORE the re-queue: resume_key_for reads the
+            # latest (interrupted | review.rejected) to choose continue-vs-restart,
+            # and without it every retry started the worker from scratch.
+            self.work._log(r["id"], "interrupted", "system",
+                           {"reason": "daemon restart"})
             self.work.set_status(r["id"], "ready", actor="system",
                                  data={"reason": "daemon restart — re-queued"})
             requeued.append(r["id"])
+        # ...but never mark an ADOPTED session interrupted: it is still running.
+        live = list(self.manager.sessions)
+        placeholders = ",".join("?" * len(live)) or "''"
         self.state.execute(
             "UPDATE sessions SET status='interrupted', ended_at=?"
-            " WHERE ended_at IS NULL AND status NOT IN ('exited','error')",
-            (now(),))
+            " WHERE ended_at IS NULL AND status NOT IN ('exited','error')"
+            f" AND id NOT IN ({placeholders})",
+            (now(), *live))
         if requeued:
             self.sink.emit(protocol.narration(
                 None, f"auto-resume: re-queued {len(requeued)} interrupted task(s)"))

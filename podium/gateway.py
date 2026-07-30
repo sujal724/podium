@@ -77,6 +77,15 @@ class Daemon:
         if CONFIG.autoresume:
             self.dispatcher.resume_interrupted()
 
+    async def boot_async(self) -> None:
+        """Adopt surviving tmux workers BEFORE re-queuing, so a restart never starts
+        a second worker on a task whose first one is still running (spec 011)."""
+        if CONFIG.autoresume:
+            try:
+                await self.dispatcher.adopt_live_sessions()
+            except Exception as e:
+                log.warning("adopting live sessions failed: %s", e)
+
     # --- one client connection ---------------------------------------------
 
     async def handle_client(self, ws) -> None:
@@ -342,6 +351,81 @@ class Daemon:
         return {"type": "agents.tree", "task_id": f["task_id"],
                 "agents": self.dispatcher.agents.tree(f["task_id"])}
 
+    async def on_session_target(self, f: dict) -> dict:
+        """Where a session's REAL terminal is, so a client can point a pane at it
+        instead of stealing its own (spec 014)."""
+        sid = f.get("session_id")
+        if not sid and f.get("task_id"):
+            rows = self.state.query(
+                "SELECT id FROM sessions WHERE task_id=? ORDER BY created_at DESC"
+                " LIMIT 1", (f["task_id"],))
+            sid = rows[0]["id"] if rows else None
+        if not sid:
+            return protocol.error("no session for that task")
+        rows = self.state.query("SELECT * FROM sessions WHERE id=?", (sid,))
+        if not rows:
+            return protocol.error(f"no session {sid}")
+        row = dict(rows[0])
+        from podium.sessions.tmux import live_sessions
+        name = f"podium-{sid}"
+        return {"type": "session.target", "session_id": sid,
+                "tmux": name, "live": name in live_sessions(),
+                "cwd": row["cwd"], "resume_key": row["resume_key"],
+                "attach": ["tmux", "attach", "-t", name],
+                "resume": (["claude", "--resume", row["resume_key"]]
+                           if row["resume_key"] else ["claude", "--continue"])}
+
+    # ---- #5 review queue ------------------------------------------------
+    async def on_review_queue(self, f: dict) -> dict:
+        """Everything awaiting you — not one variable (spec 015)."""
+        rows = self.state.query(
+            "SELECT id,title,priority,updated_at FROM tasks WHERE status='review'"
+            " ORDER BY priority, updated_at")
+        out = []
+        for r in rows:
+            task = self.work.get_task(r["id"])
+            proj = self.dispatcher._project(task)
+            base = self.dispatcher.base_ref_for(task, proj)
+            out.append({**dict(r), "merge_target": base,
+                        "branch": self.workspaces.branch(r["id"])})
+        return {"type": "review.snapshot", "tasks": out}
+
+    # ---- #6 housekeeping ------------------------------------------------
+    async def on_sessions_gc(self, f: dict) -> dict:
+        """Collapse dead sessions: keep the newest `keep` per task, drop the rest
+        from the listing (rows stay for history)."""
+        keep = int(f.get("keep", 3))
+        removed = self.state.execute(
+            "UPDATE sessions SET status='archived' WHERE id IN ("
+            "  SELECT id FROM (SELECT id, ROW_NUMBER() OVER ("
+            "    PARTITION BY task_id ORDER BY created_at DESC) rn FROM sessions"
+            "    WHERE status IN ('exited','error','interrupted')) WHERE rn > ?)",
+            (keep,)).rowcount
+        return {"type": "sessions.gc", "archived": removed, "kept_per_task": keep}
+
+    async def on_approvals_pending(self, f: dict) -> dict:
+        """Questions still waiting on you — a missed dialog is not lost (spec 016)."""
+        pend = [{"id": q.id, "session_id": q.session_id, "kind": q.pattern.id,
+                 "q": q.pattern.question, "choices": list(q.choices)}
+                for q in self.interaction.pending.values()]
+        pend += [{"id": f"peer:{rid}", "session_id": sid, "kind": "peer",
+                  "q": f"run {ev.get('command', '')}?",
+                  "choices": ["Approve — run it", "Deny"]}
+                 for rid, (wt, ev, sid) in self.dispatcher.pending_peers.items()]
+        return {"type": "approvals.pending", "questions": pend}
+
+    async def on_task_detail(self, f: dict) -> dict:
+        """Everything about one task in one answer (spec 012)."""
+        from podium import detail
+        return detail.build(f["task_id"], self.work, self.dispatcher, self.state)
+
+    async def on_task_requeue(self, f: dict) -> dict:
+        """Put a blocked task back in the queue (its retry resumes if it was
+        interrupted, or starts fresh after a rejection)."""
+        self.work.set_status(f["task_id"], "ready", actor=f.get("actor", "human"),
+                             data={"reason": "re-queued by operator"})
+        return protocol.narration(f["task_id"], "re-queued")
+
     async def on_agents_scope(self, f: dict) -> dict:
         """The whole hierarchy: workspace → project → task → session → subagent/peer."""
         return {"type": "agents.scope",
@@ -361,6 +445,7 @@ class Daemon:
     # --- serve ---------------------------------------------------------------
 
     async def serve(self, host: str | None = None, port: int | None = None):
+        await self.boot_async()
         self.boot()
         self._server = await websockets.serve(
             self.handle_client,
@@ -374,11 +459,39 @@ class Daemon:
 
 async def _amain() -> None:
     daemon = Daemon()
+    loop = asyncio.get_running_loop()
+    stopping = asyncio.Event()
+
+    def _shutdown(sig: str) -> None:
+        """A clean shutdown (laptop power-off, systemd stop) must be
+        DISTINGUISHABLE from a crash: mark in-flight tasks interrupted so the next
+        boot resumes them, and leave the tmux workers alone — they survive and are
+        adopted on the next start (spec 011)."""
+        log.info("shutdown signal %s — recording interrupts", sig)
+        for task_id in list(daemon.dispatcher.running):
+            with contextlib.suppress(Exception):
+                daemon.work._log(task_id, "interrupted", "system",
+                                 {"reason": f"daemon shutdown ({sig})"})
+        with contextlib.suppress(Exception):
+            daemon.state.execute(
+                "INSERT INTO events(session_id, ts, type, data)"
+                " VALUES(NULL, strftime('%s','now'), 'daemon.shutdown', ?)",
+                (f'{{"signal": "{sig}"}}',))
+        stopping.set()
+
+    for sig in ("SIGTERM", "SIGINT", "SIGHUP"):
+        with contextlib.suppress(NotImplementedError, AttributeError):
+            loop.add_signal_handler(getattr(__import__("signal"), sig),
+                                    _shutdown, sig)
     server = await daemon.serve()
     log.info("podiumd listening on %s", CONFIG.ws_url)
     print(f"podiumd {podium.__version__} listening on {CONFIG.ws_url}")
-    await asyncio.get_running_loop().create_future()  # run forever
-    del server
+    await stopping.wait()
+    server.close()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(server.wait_closed(), timeout=5)
+    daemon.state.close()
+    print("podiumd stopped — tmux workers keep running and are adopted on restart")
 
 
 def main() -> None:
