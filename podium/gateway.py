@@ -94,6 +94,11 @@ class Daemon:
             await ws.send(protocol.dumps(protocol.hello(
                 podium.__version__, self.manager.availability())))
             snap = self.manager.snapshot()
+            # A long-running worker's backlog once exceeded the frame limit and
+            # disconnected EVERY client on connect. Send a bounded tail; the full
+            # transcript lives on disk and in the session's own terminal.
+            snap["backlogs"] = {sid: text[-64_000:]
+                                for sid, text in snap["backlogs"].items()}
             await ws.send(protocol.dumps(protocol.snapshot(
                 snap["sessions"], snap["backlogs"])))
             forward = asyncio.create_task(self._forward(ws, q))
@@ -335,6 +340,14 @@ class Daemon:
                 await asyncio.wait_for(self._server.wait_closed(), timeout=5)
         with contextlib.suppress(Exception):
             self.state.close()
+        # Re-exec the SAME entry point so the process keeps its name: after an
+        # update it used to come back as `python -m podium.gateway`, which broke
+        # every `pkill -f podiumd` and made "did it restart?" unanswerable.
+        script = Path(sys.argv[0]).name
+        if script.startswith("podiumd"):
+            log.info("re-exec %s (update applied)", sys.argv[0])
+            os.execv(sys.argv[0], sys.argv)
+        log.info("re-exec python -m podium.gateway (update applied)")
         os.execv(sys.executable, [sys.executable, "-m", "podium.gateway"])
 
     async def _update_watch(self) -> None:
@@ -447,6 +460,28 @@ class Daemon:
     async def serve(self, host: str | None = None, port: int | None = None):
         await self.boot_async()
         self.boot()
+        host_ = host if host is not None else CONFIG.host
+        port_ = port if port is not None else CONFIG.port
+        if port_:
+            import socket
+            probe = socket.socket()
+            try:
+                probe.bind((host_, port_))
+            except OSError:
+                holder = ""
+                with contextlib.suppress(Exception):
+                    out = __import__("subprocess").run(
+                        ["ss", "-tlnp"], capture_output=True, text=True).stdout
+                    holder = next((l.split("pid=")[1].split(",")[0]
+                                   for l in out.splitlines()
+                                   if f":{port_} " in l and "pid=" in l), "")
+                raise SystemExit(
+                    f"podiumd: {host_}:{port_} is already in use"
+                    + (f" by PID {holder}" if holder else "")
+                    + ".\nAnother daemon is running — stop it first "
+                      "(`pkill -f podiumd`), or set PODIUM_PORT.")
+            finally:
+                probe.close()
         self._server = await websockets.serve(
             self.handle_client,
             host if host is not None else CONFIG.host,
