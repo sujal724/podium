@@ -351,6 +351,18 @@ class Daemon:
         return {"type": "agents.tree", "task_id": f["task_id"],
                 "agents": self.dispatcher.agents.tree(f["task_id"])}
 
+    async def on_task_detail(self, f: dict) -> dict:
+        """Everything about one task in one answer (spec 012)."""
+        from podium import detail
+        return detail.build(f["task_id"], self.work, self.dispatcher, self.state)
+
+    async def on_task_requeue(self, f: dict) -> dict:
+        """Put a blocked task back in the queue (its retry resumes if it was
+        interrupted, or starts fresh after a rejection)."""
+        self.work.set_status(f["task_id"], "ready", actor=f.get("actor", "human"),
+                             data={"reason": "re-queued by operator"})
+        return protocol.narration(f["task_id"], "re-queued")
+
     async def on_agents_scope(self, f: dict) -> dict:
         """The whole hierarchy: workspace → project → task → session → subagent/peer."""
         return {"type": "agents.scope",

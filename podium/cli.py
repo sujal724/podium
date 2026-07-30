@@ -187,6 +187,65 @@ def cmd_tree(args) -> None:
                   f"{'  ' + detail if detail else ''}")
 
 
+def _age(seconds: int) -> str:
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def cmd_task(args) -> None:
+    """Full clarity on one task: stage, base, sessions, what you can do."""
+    frames = asyncio.run(_rpc({"type": "task.detail", "task_id": args.task_id}))
+    d = next((f for f in frames if f["type"] == "task.detail"), None)
+    if d is None:
+        _print(frames); return
+    t, g = d["task"], d["git"]
+    bc = d["breadcrumb"]
+    path = " → ".join(filter(None, [
+        (bc["workspace"] or {}).get("name"), (bc["project"] or {}).get("name"),
+        *[p["title"] for p in bc["parents"]]]))
+    print(f"{t['id']}  {t['title']}")
+    print(f"  {path}")
+    print(f"\n  stage      {t['status']}  (for {_age(d['since'])})"
+          f"  P{t['priority']}  origin={t['origin']}"
+          + (f"/{t['detector']}" if t.get("detector") else ""))
+    if d["reason"]:
+        print(f"  why        {d['reason']}")
+        print(f"  next       {d['hint']}")
+    print(f"  worker     {t.get('assignee') or '—'}  ·  mode "
+          f"{d['autonomy']['mode']} ({d['autonomy']['source']})")
+    print(f"\n  branch     {g['branch']}")
+    print(f"  base       {g['base_ref']}  ← {g['base_reason']}")
+    print(f"  merges to  {g['merge_target']}")
+    print(f"  commits    {g.get('commits_ahead', 0)} ahead"
+          + (f"  ({g['diffstat'].strip()})" if g.get("diffstat") else ""))
+    print(f"  worktree   {g['worktree'] or '—'}"
+          + ("" if g["worktree_exists"] else "  (gone)"))
+    if d["blocked_by"] or d["blocks"] or d["subtasks"]:
+        print()
+        for dep in d["blocked_by"]:
+            print(f"  blocked by {dep['id']} [{dep['status']}] {dep['title']}")
+        for dep in d["blocks"]:
+            print(f"  blocks     {dep['id']} [{dep['status']}] {dep['title']}")
+        for sub in d["subtasks"]:
+            print(f"  subtask    {sub['id']} [{sub['status']}] {sub['title']}")
+    print(f"\n  resume     {d['resume']['explanation']}")
+    for s in d["sessions"][:6]:
+        line = f"  session    {s['id']} [{s['status']}] {s['worker']}"
+        if s.get("resume_key"):
+            line += f"  claude --resume {s['resume_key']}"
+        print(line)
+    if d["feedback"]:
+        print()
+        for fb in d["feedback"]:
+            print(f"  feedback   {fb.get('feedback', '')[:100]}")
+    print("\n  actions")
+    for name, a in d["actions"].items():
+        mark = "✓" if a["enabled"] else "✗"
+        print(f"    {mark} {name:<9} {a['reason']}")
+
+
 def cmd_open(args) -> None:
     """Drop into a task's worktree and resume its exact Claude session in THIS
     terminal (falls back to --continue when the session id isn't captured yet)."""
@@ -324,6 +383,9 @@ def main() -> None:
     s.set_defaults(fn=cmd_task_add)
 
     sub.add_parser("board").set_defaults(fn=cmd_board)
+
+    s = sub.add_parser("task", help="full detail for one task (stage, base, sessions)")
+    s.add_argument("task_id"); s.set_defaults(fn=cmd_task)
 
     s = sub.add_parser("task-run")
     s.add_argument("task_id"); s.add_argument("--worker")

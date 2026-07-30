@@ -74,6 +74,7 @@ class Cockpit(App):
         Binding("ctrl+t", "focus_takeover", "takeover"),
         Binding("ctrl+o", "open_in_claude", "open in claude"),
         Binding("ctrl+p", "change_mode", "change mode"),
+        Binding("ctrl+u", "requeue", "re-queue task"),
         Binding("ctrl+b", "focus_board", "board"),
         Binding("ctrl+q", "quit", "quit"),
         Binding("escape", "send_escape", "esc → session"),
@@ -138,6 +139,8 @@ class Cockpit(App):
                                                 "session (Enter sends)", id="takeover")
                     with TabPane("review", id="tab-review"):
                         yield RichLog(id="review-log", highlight=True, wrap=False)
+                    with TabPane("task", id="tab-task"):
+                        yield RichLog(id="task-log", wrap=True)
                     with TabPane("agents", id="tab-agents"):
                         yield RichLog(id="agents-log", wrap=True)
                     with TabPane("inbox", id="tab-inbox"):
@@ -247,6 +250,35 @@ class Cockpit(App):
             log.write(f"task {f['task_id']} on {f['branch']} — a=approve r=reject\n")
             log.write(Text(f["diff"]))
             feed.write(f"review ready: {f['task_id']}")
+        elif t == "task.detail":
+            log = self.query_one("#task-log", RichLog)
+            log.clear()
+            task, g = f["task"], f["git"]
+            log.write(f"[b]{task['id']}  {task['title']}[/b]")
+            log.write(f"stage: {task['status']}  ·  P{task['priority']}  ·  "
+                      f"mode {f['autonomy']['mode']} ({f['autonomy']['source']})")
+            if f.get("reason"):
+                log.write(f"[red]why:[/red] {f['reason']}")
+                log.write(f"next: {f['hint']}")
+            log.write("")
+            log.write(f"branch     {g['branch']}")
+            log.write(f"base       {g['base_ref']}  ← {g['base_reason']}")
+            log.write(f"merges to  {g['merge_target']}")
+            log.write(f"commits    {g.get('commits_ahead', 0)} ahead "
+                      f"{g.get('diffstat', '')}")
+            for dep in f.get("blocked_by", []):
+                log.write(f"blocked by {dep['id']} [{dep['status']}] {dep['title']}")
+            for sub in f.get("subtasks", []):
+                log.write(f"subtask    {sub['id']} [{sub['status']}] {sub['title']}")
+            log.write("")
+            log.write(f"resume     {f['resume']['explanation']}")
+            for sess in f.get("sessions", [])[:6]:
+                extra = (f"  claude --resume {sess['resume_key']}"
+                         if sess.get("resume_key") else "")
+                log.write(f"session    {sess['id']} [{sess['status']}]{extra}")
+            log.write("")
+            for name, a in f.get("actions", {}).items():
+                log.write(f"{'✓' if a['enabled'] else '✗'} {name:<9} {a['reason']}")
         elif t in ("agents.tree", "agents.updated"):
             log = self.query_one("#agents-log", RichLog)
             log.clear()
@@ -321,6 +353,11 @@ class Cockpit(App):
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         if getattr(event.node, "data", None):
             self.selected_task = event.node.data
+            # selecting a task pulls its full detail (spec 012)
+            asyncio.create_task(self._send(
+                {"type": "task.detail", "task_id": event.node.data}))
+            asyncio.create_task(self._send(
+                {"type": "agents.tree", "task_id": event.node.data}))
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "takeover" and self.selected_session:
@@ -344,6 +381,14 @@ class Cockpit(App):
     async def action_dispatch(self) -> None:
         await self._send({"type": "run.next"})
         self.query_one("#feed-log", RichLog).write("dispatch requested (run next)")
+
+    async def action_requeue(self) -> None:
+        """Put the selected blocked task back in the queue (its retry resumes)."""
+        if self.selected_task:
+            await self._send({"type": "task.requeue",
+                              "task_id": self.selected_task})
+            await self._send({"type": "task.detail",
+                              "task_id": self.selected_task})
 
     def action_focus_takeover(self) -> None:
         self.query_one("#takeover", Input).focus()

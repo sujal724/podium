@@ -434,3 +434,33 @@ async def test_adopt_live_session_instead_of_requeuing(rig, monkeypatch):
     assert row["status"] == "running"
     for task in disp.running.values():
         task.cancel()
+
+
+async def test_task_detail_explains_stage_base_and_actions(rig):
+    """Spec 012: one answer covering stage+cause, the base and WHY it's the base,
+    the merge target, the resume decision, and actions with reasons when disabled."""
+    from podium import detail
+    disp, work, proj, repo = rig
+    parent = work.create_task(proj, "parent", status="ready")
+    child = work.create_task(proj, "child", parent_id=parent, status="ready")
+    d = detail.build(child, work, disp, disp.state)
+    assert d["git"]["base_ref"] == f"task/{parent}"
+    assert "parent task" in d["git"]["base_reason"]
+    assert d["git"]["merge_target"] == f"task/{parent}"
+    assert d["breadcrumb"]["parents"][0]["id"] == parent
+    assert d["actions"]["run"]["enabled"] is True
+    assert d["actions"]["approve"]["enabled"] is False       # not in review
+    assert "starts fresh" in d["resume"]["explanation"]
+
+    # a parent in review with an unfinished child explains exactly why it can't merge
+    work.set_status(parent, "review")
+    dp = detail.build(parent, work, disp, disp.state)
+    assert dp["actions"]["approve"]["enabled"] is False
+    assert child in dp["actions"]["approve"]["reason"]
+    assert dp["subtasks"][0]["id"] == child
+
+    # a blocked task states its cause AND the next action in plain words
+    work.set_status(child, "blocked", data={"error": "session exited (126) with no commits"})
+    db = detail.build(child, work, disp, disp.state)
+    assert "126" in db["reason"] and db["hint"]
+    assert db["actions"]["requeue"]["enabled"] is True
