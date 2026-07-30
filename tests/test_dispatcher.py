@@ -464,3 +464,38 @@ async def test_task_detail_explains_stage_base_and_actions(rig):
     db = detail.build(child, work, disp, disp.state)
     assert "126" in db["reason"] and db["hint"]
     assert db["actions"]["requeue"]["enabled"] is True
+
+
+async def test_approve_via_pr_keeps_the_branch_and_never_touches_base(rig, monkeypatch):
+    """A local merge is a trap when the base is protected: it succeeds locally, marks
+    the task done, deletes the branch, and only fails later at push time with nothing
+    left to open a PR from. --pr pushes, opens the PR, and leaves base alone."""
+    import subprocess
+    disp, work, proj, repo = rig
+    t = work.create_task(proj, "shippable", status="ready")
+    await disp.run_task(t)
+    await _await_status(work, t, ("review",))
+    base_before = subprocess.run(["git", "-C", str(repo), "rev-parse", "main"],
+                                 capture_output=True, text=True).stdout
+
+    calls = []
+    real = subprocess.run
+
+    def fake_run(cmd, *a, **kw):
+        if cmd[:1] == ["gh"] or (len(cmd) > 3 and cmd[3] == "push"):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "https://gh/pr/42\n", "")
+        return real(cmd, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    out = await disp.approve_via_pr(t, actor="sujal")
+    assert out["url"] == "https://gh/pr/42" and out["base"] == "main"
+    assert any(c[:1] == ["gh"] for c in calls) and any("push" in c for c in calls)
+    assert work.get_task(t).status == "done"
+    # the base branch was NOT written to, and the task branch still exists
+    monkeypatch.undo()
+    assert subprocess.run(["git", "-C", str(repo), "rev-parse", "main"],
+                          capture_output=True, text=True).stdout == base_before
+    assert subprocess.run(["git", "-C", str(repo), "branch", "--list",
+                           f"task/{t}"], capture_output=True,
+                          text=True).stdout.strip()
