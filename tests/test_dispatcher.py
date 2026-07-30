@@ -391,3 +391,22 @@ def test_peer_shim_depth_cap(tmp_path, monkeypatch):
     assert peer_shim.main(["shim", "claude", "-p", "hi"]) == 126
     line = json.loads((tmp_path / ".podium" / "peer.jsonl").read_text().strip())
     assert line["outcome"] == "blocked" and "depth cap" in line["reason"]
+
+
+async def test_boot_resume_marks_interrupted_so_retry_continues(rig):
+    """Dogfood: 'run next' restarted the worker from scratch every time. Boot
+    auto-resume logged only a status change, so resume_key_for saw no `interrupted`
+    event and always chose a fresh start. The interrupt must be recorded."""
+    disp, work, proj, repo = rig
+    t = work.create_task(proj, "resume me", status="ready")
+    claimed = work.claim("mock", t)
+    work.set_status(claimed.id, "running")
+    disp.state.execute(
+        "INSERT INTO sessions(id,task_id,worker,kind,cwd,status,resume_key,created_at)"
+        " VALUES('s_prev',?,'mock','tmux','/tmp','interrupted','claude-uuid-7',1)",
+        (t,))
+    assert disp.resume_interrupted() == [t]
+    types = [r["type"] for r in disp.state.query(
+        "SELECT type FROM task_events WHERE task_id=? ORDER BY id", (t,))]
+    assert "interrupted" in types
+    assert disp.resume_key_for(t, "mock") == "claude-uuid-7"   # retry CONTINUES

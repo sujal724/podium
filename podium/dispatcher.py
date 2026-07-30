@@ -395,6 +395,12 @@ class Dispatcher:
         requeued = []
         for r in self.state.query(
                 "SELECT id FROM tasks WHERE status IN ('assigned','running')"):
+            # Log the interrupt FIRST: resume_key_for reads the latest of
+            # (interrupted | review.rejected) to decide continue-vs-restart, and
+            # without this the re-queue looked like an ordinary status change and
+            # every retry started the worker from scratch (dogfood finding).
+            self.work._log(r["id"], "interrupted", "system",
+                           {"reason": "daemon restart"})
             self.work.set_status(r["id"], "ready", actor="system",
                                  data={"reason": "daemon restart — re-queued"})
             requeued.append(r["id"])
