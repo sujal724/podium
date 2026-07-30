@@ -274,3 +274,21 @@ def test_cli_has_no_duplicate_subcommands():
             pytest.raises(SystemExit):
         cli.main()
     assert "pending" in seen and len(seen) == len(set(seen))
+
+
+def test_board_groups_by_what_needs_attention():
+    """Operator finding: a flat list with the status in brackets made 'is anything
+    done? running? waiting on me?' unanswerable at a glance. Group by attention."""
+    from podium.cli import GROUPS
+    order = [name for name, _, _ in GROUPS]
+    assert order[0] == "needs you" and order[-1] == "done"
+    needs_you = next(st for name, _, st in GROUPS if name == "needs you")
+    assert {"review", "blocked", "proposed"} == set(needs_you)
+    running = next(st for name, _, st in GROUPS if name == "running")
+    assert "running" in running and "verifying" in running
+    # every lifecycle status has exactly one home — nothing can vanish from the board
+    from podium.work.store import STATUSES
+    homes = [st for _, _, sts in GROUPS for st in sts]
+    assert len(homes) == len(set(homes)), "a status may not appear in two groups"
+    missing = set(STATUSES) - set(homes) - {"discarded"}
+    assert not missing, f"statuses with no group: {missing}"

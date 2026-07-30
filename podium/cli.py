@@ -71,14 +71,49 @@ def cmd_task_add(args) -> None:
                              "fields": fields})))
 
 
+# The board groups by WHAT NEEDS YOU, not by insertion order: a flat list with the
+# status buried in brackets made "is anything done? is anything running?"
+# unanswerable at a glance (operator finding).
+GROUPS = [
+    ("needs you", "★", ("review", "proposed", "blocked")),
+    ("running",   "▶", ("running", "assigned", "verifying")),
+    ("queued",    "○", ("ready",)),
+    ("waiting",   "·", ("backlog", "parked")),
+    ("done",      "✓", ("done",)),
+]
+
+
 def cmd_board(args) -> None:
     frames = asyncio.run(_rpc({"type": "work.list"}))
-    for f in frames:
-        if f["type"] != "work.snapshot":
+    snap = next((f for f in frames if f["type"] == "work.snapshot"), None)
+    if snap is None:
+        _print(frames); return
+    tasks = [t for t in snap.get("tasks", []) if t["status"] != "discarded"]
+    by_status = {}
+    for t in tasks:
+        by_status.setdefault(t["status"], []).append(t)
+
+    counts = " · ".join(f"{len(v)} {k}" for k, v in sorted(
+        by_status.items(), key=lambda kv: -len(kv[1])))
+    print(f"{len(tasks)} tasks — {counts}\n")
+
+    for name, mark, statuses in GROUPS:
+        rows = [t for st in statuses for t in by_status.get(st, [])]
+        if not rows:
             continue
-        for t in f.get("tasks", []):
-            print(f"{t['id']}  [{t['status']:>9}]  P{t['priority']}  {t['title']}"
-                  + (f"  ← {t['assignee']}" if t.get("assignee") else ""))
+        if name == "done" and not args.all:
+            print(f"{mark} done ({len(rows)})  — podium board --all to list")
+            continue
+        print(f"{mark} {name.upper()} ({len(rows)})")
+        for t in sorted(rows, key=lambda t: (t["priority"], t["id"])):
+            who = f"  ← {t['assignee']}" if t.get("assignee") else ""
+            print(f"    {t['id']}  P{t['priority']}  {t['title']}{who}")
+            if t["status"] == "blocked":
+                print(f"{'':10}blocked — podium task {t['id']} shows why")
+            elif t["status"] == "review":
+                print(f"{'':10}awaiting you — podium review {t['id']} · "
+                      f"approve {t['id']}")
+        print()
 
 
 def cmd_task_run(args) -> None:
@@ -474,7 +509,9 @@ def main() -> None:
     s.add_argument("--dep", action="append", help="task id this task is blocked by")
     s.set_defaults(fn=cmd_task_add)
 
-    sub.add_parser("board").set_defaults(fn=cmd_board)
+    s = sub.add_parser("board", help="tasks grouped by what needs you")
+    s.add_argument("--all", action="store_true", help="list done tasks too")
+    s.set_defaults(fn=cmd_board)
 
     s = sub.add_parser("task", help="full detail for one task (stage, base, sessions)")
     s.add_argument("task_id"); s.set_defaults(fn=cmd_task)
