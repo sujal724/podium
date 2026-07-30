@@ -391,3 +391,76 @@ def test_peer_shim_depth_cap(tmp_path, monkeypatch):
     assert peer_shim.main(["shim", "claude", "-p", "hi"]) == 126
     line = json.loads((tmp_path / ".podium" / "peer.jsonl").read_text().strip())
     assert line["outcome"] == "blocked" and "depth cap" in line["reason"]
+
+
+async def test_adopt_live_session_instead_of_requeuing(rig, monkeypatch):
+    """Spec 011: workers run in tmux and OUTLIVE the daemon. On boot the daemon must
+    adopt a surviving worker — re-queuing would start a second worker on the same
+    task while the first kept running."""
+    disp, work, proj, repo = rig
+    t = work.create_task(proj, "survivor", status="ready")
+    claimed = work.claim("mock", t)
+    work.set_status(claimed.id, "running")
+    disp.state.execute(
+        "INSERT INTO sessions(id,task_id,worker,kind,cwd,status,created_at)"
+        " VALUES('s_live',?,'mock','tmux',?,'running',1)", (t, str(repo)))
+
+    adopted_calls = []
+
+    class FakeTmux:
+        def __init__(self, sid, label, cwd, sink, argv):
+            self.id, self.label, self.cwd = sid, label, cwd
+            self.kind, self.status, self.exit_code = "tmux", "running", None
+            self.task_id = None
+        async def adopt(self):
+            adopted_calls.append(self.id)
+        async def wait(self):
+            await asyncio.sleep(3600)          # still running
+        def info(self):
+            return {"id": self.id, "label": self.label, "kind": self.kind,
+                    "status": self.status, "cwd": self.cwd}
+
+    import podium.sessions.tmux as tmod
+    monkeypatch.setattr(tmod, "live_sessions", lambda: {"podium-s_live"})
+    monkeypatch.setattr(tmod, "TmuxSession", FakeTmux)
+
+    assert await disp.adopt_live_sessions() == [t]
+    assert adopted_calls == ["s_live"]
+    assert work.get_task(t).status == "running"       # NOT re-queued
+    # the follow-up re-queue pass must leave the adopted task and session alone
+    assert disp.resume_interrupted() == []
+    assert work.get_task(t).status == "running"
+    row = disp.state.query("SELECT status FROM sessions WHERE id='s_live'")[0]
+    assert row["status"] == "running"
+    for task in disp.running.values():
+        task.cancel()
+
+
+async def test_task_detail_explains_stage_base_and_actions(rig):
+    """Spec 012: one answer covering stage+cause, the base and WHY it's the base,
+    the merge target, the resume decision, and actions with reasons when disabled."""
+    from podium import detail
+    disp, work, proj, repo = rig
+    parent = work.create_task(proj, "parent", status="ready")
+    child = work.create_task(proj, "child", parent_id=parent, status="ready")
+    d = detail.build(child, work, disp, disp.state)
+    assert d["git"]["base_ref"] == f"task/{parent}"
+    assert "parent task" in d["git"]["base_reason"]
+    assert d["git"]["merge_target"] == f"task/{parent}"
+    assert d["breadcrumb"]["parents"][0]["id"] == parent
+    assert d["actions"]["run"]["enabled"] is True
+    assert d["actions"]["approve"]["enabled"] is False       # not in review
+    assert "starts fresh" in d["resume"]["explanation"]
+
+    # a parent in review with an unfinished child explains exactly why it can't merge
+    work.set_status(parent, "review")
+    dp = detail.build(parent, work, disp, disp.state)
+    assert dp["actions"]["approve"]["enabled"] is False
+    assert child in dp["actions"]["approve"]["reason"]
+    assert dp["subtasks"][0]["id"] == child
+
+    # a blocked task states its cause AND the next action in plain words
+    work.set_status(child, "blocked", data={"error": "session exited (126) with no commits"})
+    db = detail.build(child, work, disp, disp.state)
+    assert "126" in db["reason"] and db["hint"]
+    assert db["actions"]["requeue"]["enabled"] is True

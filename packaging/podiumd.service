@@ -1,0 +1,18 @@
+[Unit]
+Description=Podium daemon (orchestrator for AI coding agents)
+Documentation=https://github.com/sujal724/podium
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.podium/venv/bin/podiumd
+Restart=on-failure
+RestartSec=3
+# Workers live in tmux and outlive this unit; a stop records interrupts and the
+# next start adopts whatever is still running (spec 011).
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
