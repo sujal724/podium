@@ -236,3 +236,20 @@ async def test_session_target_points_at_the_real_terminal(daemon):
     assert tgt["attach"] == ["tmux", "attach", "-t", "podium-s_tg"]
     assert tgt["resume"] == ["claude", "--resume", "uuid-1"]
     assert tgt["live"] is False        # no tmux here — stated, not faked
+
+
+async def test_review_queue_is_answerable_after_a_restart(daemon):
+    """Dogfood: the cockpit's review pane only filled from the live `review.ready`
+    broadcast, so work that finished before you connected was invisible. The queue
+    must be QUERYABLE, not just announced."""
+    d, url, repo = daemon
+    ws_id = d.work.create_workspace("w")
+    proj = d.work.create_project(ws_id, "p", repo_root=str(repo))
+    t = d.work.create_task(proj, "finished while you were away", status="ready")
+    d.work.set_status(t, "review")           # finished before any client connected
+    ws, _ = await _client(url)               # connect AFTER the fact
+    await ws.send(protocol.dumps({"type": "review.queue"}))
+    snap = await _recv_type(ws, "review.snapshot")
+    assert [x["id"] for x in snap["tasks"]] == [t]
+    assert snap["tasks"][0]["merge_target"] == "main"
+    await ws.close()
