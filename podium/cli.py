@@ -366,8 +366,18 @@ def cmd_term(args) -> None:
         subprocess.run(["tmux", "kill-session", "-t", window])
     subprocess.run(["tmux", "new-session", "-d", "-s", window, "podium tui"],
                    check=True)
-    worker = args.session or next(
-        (s for s in live if s.startswith("podium-s_")), None)
+    worker = args.session
+    if not worker:
+        # ask the daemon which session is live — guessing from tmux names missed
+        # sessions and left the right pane empty (dogfood finding)
+        frames = asyncio.run(_rpc({"type": "sessions.list"}))
+        running = [s for f in frames if f["type"] == "sessions.snapshot"
+                   for s in f["sessions"] if s["status"] in ("running", "starting")]
+        if running:
+            worker = f"podium-{running[0]['id']}"
+    if worker and worker not in live:
+        print(f"session {worker} has no live terminal (it may have exited)")
+        worker = None
     if worker:
         # move the worker's own pane into this window: two real terminals, one page
         subprocess.run(["tmux", "join-pane", "-h", "-s", f"{worker}:",

@@ -1,0 +1,58 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(claude *)",
+      "Bash(gemini *)",
+      "Bash(codex *)",
+      "Bash(podium *)",
+      "Bash(podiumd *)",
+      "Bash(claude)",
+      "Bash(gemini)",
+      "Bash(codex)",
+      "Bash(podium)",
+      "Bash(podiumd)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >> \"/home/sujal/Desktop/podium/.podium/worktrees/tt4/.podium/hooks.jsonl\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >> \"/home/sujal/Desktop/podium/.podium/worktrees/tt4/.podium/hooks.jsonl\""
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >> \"/home/sujal/Desktop/podium/.podium/worktrees/tt4/.podium/hooks.jsonl\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >> \"/home/sujal/Desktop/podium/.podium/worktrees/tt4/.podium/hooks.jsonl\""
+          }
+        ]
+      }
+    ]
+  }
+}
