@@ -253,3 +253,24 @@ async def test_review_queue_is_answerable_after_a_restart(daemon):
     assert [x["id"] for x in snap["tasks"]] == [t]
     assert snap["tasks"][0]["merge_target"] == "main"
     await ws.close()
+
+
+def test_cli_has_no_duplicate_subcommands():
+    """A merge added a second `pending` subparser; argparse raised on registration,
+    so EVERY podium command crashed before doing anything. Guard the parser itself."""
+    import argparse
+    from unittest.mock import patch
+    from podium import cli
+    seen = []
+    real = argparse._SubParsersAction.add_parser
+
+    def spy(self, name, **kw):
+        assert name not in seen, f"duplicate subcommand: {name}"
+        seen.append(name)
+        return real(self, name, **kw)
+
+    with patch.object(argparse._SubParsersAction, "add_parser", spy), \
+            patch("sys.argv", ["podium", "--help"]), \
+            pytest.raises(SystemExit):
+        cli.main()
+    assert "pending" in seen and len(seen) == len(set(seen))
