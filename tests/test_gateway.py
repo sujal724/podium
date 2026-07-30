@@ -292,3 +292,24 @@ def test_board_groups_by_what_needs_attention():
     assert len(homes) == len(set(homes)), "a status may not appear in two groups"
     missing = set(STATUSES) - set(homes) - {"discarded"}
     assert not missing, f"statuses with no group: {missing}"
+
+
+async def test_port_probe_does_not_false_positive(tmp_path, repo):
+    """The pre-bind check must probe with the SAME options asyncio uses. Without
+    SO_REUSEADDR it reported a phantom 'already in use' after a daemon was killed —
+    an error no pkill could clear, because the port was genuinely free."""
+    import socket
+    from podium.gateway import Daemon
+    # hold a socket the way a just-stopped daemon leaves one: bound with REUSEADDR
+    holder = socket.socket()
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("127.0.0.1", 0))
+    port = holder.getsockname()[1]
+    holder.close()                      # released, but recently used
+
+    d = Daemon(state_db=str(tmp_path / "s.db"), workdir=str(tmp_path / "w"))
+    server = await d.serve(host="127.0.0.1", port=port)   # must NOT raise SystemExit
+    assert server.sockets[0].getsockname()[1] == port
+    server.close()
+    await server.wait_closed()
+    d.state.close()
