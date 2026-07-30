@@ -382,6 +382,55 @@ class Dispatcher:
                     r["id"], f"base advanced: sibling {task_id} landed on {base} — "
                              "re-run or merge the base in to pick it up"))
 
+    async def approve_via_pr(self, task_id: str, actor: str = "human",
+                             title: str | None = None) -> dict:
+        """Approve WITHOUT merging locally: push the task branch and open a PR
+        against its base, then mark the task done.
+
+        For a protected base branch a local merge is a trap — it succeeds locally,
+        marks the task done, deletes the branch, and only fails later at push time
+        with nothing left to open a PR from. This route never writes to the base.
+        """
+        task = self.work.get_task(task_id)
+        if task.status != "review":
+            raise DispatchError(f"task {task_id} is not in review "
+                                f"(status={task.status})")
+        unfinished = [r["id"] for r in self.state.query(
+            "WITH RECURSIVE kids(id) AS (SELECT id FROM tasks WHERE parent_id=:root"
+            " UNION ALL SELECT t.id FROM tasks t JOIN kids k ON t.parent_id=k.id)"
+            " SELECT k.id FROM kids k JOIN tasks t ON t.id=k.id"
+            " WHERE t.status NOT IN ('done','discarded')", {"root": task_id})]
+        if unfinished:
+            raise DispatchError(
+                f"task {task_id} has unfinished subtasks ({', '.join(unfinished)})")
+        proj = self._project(task)
+        repo, branch = proj["repo_root"], self.workspaces.branch(task_id)
+        base = self.base_ref_for(task, proj)
+        import subprocess
+        push = subprocess.run(["git", "-C", repo, "push", "-u", "origin", branch],
+                              capture_output=True, text=True)
+        if push.returncode != 0:
+            raise DispatchError(f"push failed: {push.stderr.strip()[-300:]}")
+        pr = subprocess.run(
+            ["gh", "pr", "create", "--base", base, "--head", branch,
+             "--title", title or task.title,
+             "--body", f"{task.description}\n\n---\nPodium task `{task_id}` — "
+                       f"approved by {actor}; merging is the PR's job, so the base "
+                       f"branch is never written to locally."],
+            cwd=repo, capture_output=True, text=True)
+        url = pr.stdout.strip().splitlines()[-1] if pr.returncode == 0 else ""
+        if pr.returncode != 0 and "already exists" not in pr.stderr:
+            raise DispatchError(f"gh pr create failed: {pr.stderr.strip()[-300:]}")
+        self.work._log(task_id, "approved.pr", actor, {"branch": branch,
+                                                       "base": base, "url": url})
+        self.work.update_task(task_id, actor=actor, worktree=None, status="done")
+        self.workspaces.remove(repo, task_id)      # worktree goes; BRANCH STAYS
+        self.sink.emit(protocol.narration(
+            task_id, f"approved by {actor} — PR opened against {base}: {url or branch}"
+                     " (branch kept; the PR does the merging)"))
+        return {"type": "review.pr", "task_id": task_id, "branch": branch,
+                "base": base, "url": url}
+
     async def reject(self, task_id: str, feedback: str, actor: str = "human") -> None:
         task = self.work.get_task(task_id)
         if task.status != "review":

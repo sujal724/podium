@@ -305,7 +305,12 @@ class Daemon:
         tid = await self.dispatcher.run_next(f.get("worker"))
         return {"type": "task.running" if tid else "idle", "task_id": tid}
 
-    async def on_review_approve(self, f: dict) -> None:
+    async def on_review_approve(self, f: dict):
+        """`mode="pr"` opens a pull request instead of merging locally — the right
+        route when the base branch is protected (or you simply want it reviewed)."""
+        if f.get("mode") == "pr":
+            return await self.dispatcher.approve_via_pr(
+                f["task_id"], f.get("actor", "human"), f.get("title"))
         await self.dispatcher.approve(f["task_id"], f.get("actor", "human"))
 
     async def on_review_reject(self, f: dict) -> None:

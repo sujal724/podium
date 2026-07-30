@@ -96,7 +96,10 @@ def cmd_review(args) -> None:
 
 
 def cmd_approve(args) -> None:
-    _print(asyncio.run(_rpc({"type": "review.approve", "task_id": args.task_id})))
+    frame = {"type": "review.approve", "task_id": args.task_id}
+    if args.pr:
+        frame["mode"] = "pr"
+    _print(asyncio.run(_rpc(frame)))
 
 
 def cmd_reject(args) -> None:
@@ -480,7 +483,12 @@ def main() -> None:
     s.add_argument("task_id", nargs="?"); s.set_defaults(fn=cmd_tree)
 
     s = sub.add_parser("review"); s.add_argument("task_id"); s.set_defaults(fn=cmd_review)
-    s = sub.add_parser("approve"); s.add_argument("task_id"); s.set_defaults(fn=cmd_approve)
+    s = sub.add_parser("approve")
+    s.add_argument("task_id")
+    s.add_argument("--pr", action="store_true",
+                   help="open a pull request instead of merging locally "
+                        "(required when the base branch is protected)")
+    s.set_defaults(fn=cmd_approve)
     s = sub.add_parser("reject")
     s.add_argument("task_id"); s.add_argument("feedback")
     s.set_defaults(fn=cmd_reject)
